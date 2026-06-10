@@ -1,4 +1,4 @@
-#include "stereo_vo.hpp"
+#include "stereo_vo.h"
 #include <fstream>
 #include <sstream>
 #include <opencv2/calib3d/calib3d.hpp>
