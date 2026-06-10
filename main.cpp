@@ -60,7 +60,7 @@ void TrackingThread() {
     sort(files_left.begin(), files_left.end());
     sort(files_right.begin(), files_right.end());
 
-    ofstream traj_out("trajectory.txt");
+    ofstream traj_out("/home/wzj/stereovo/trajectory.txt");
     traj_out << "# x y z (Global Trajectory)" << endl;
     Sophus::SE3d global_pose;      // 世界坐标系下的相机位姿，初始为单位阵
     traj_out << 0.0 << " " << 0.0 << " " << 0.0 << endl;

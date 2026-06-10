@@ -123,7 +123,7 @@ void bundleAdjustment(const vector<cv::Point3f>& points_3d,
     // 配置并运行求解器
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::DENSE_QR;
-    options.minimizer_progress_to_stdout = true;
+    options.minimizer_progress_to_stdout = false;
     options.max_num_iterations = 20;
     
     cout << "\n[Ceres] 开始执行 Bundle Adjustment (手动解析求导)..." << endl;
