@@ -4,7 +4,7 @@ import os
 
 def compare_vo_with_ground_truth():
     file_vo = 'trajectory.txt'
-    file_gt = '07.txt'
+    file_gt = '04.txt'
 
     # 1. 检查文件
     if not os.path.exists(file_vo) or not os.path.exists(file_gt):

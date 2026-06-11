@@ -44,14 +44,14 @@ atomic<bool> system_running{true};
 // ==============================================================================
 void TrackingThread() {
     StereoVO vo;    // 使用 stereo_vo.h 中定义的类
-    if (!vo.loadCalibration("/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/calib.txt")) {
+    if (!vo.loadCalibration("/home/wzj/KITTI/data_odometry_gray/dataset/sequences/04/calib.txt")) {
         cerr << "标定加载失败!" << endl;
         system_running = false;
         return;
     }
 
-    string path_left = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/image_0";
-    string path_right = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/image_1";
+    string path_left = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/04/image_0";
+    string path_right = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/04/image_1";
     vector<string> files_left, files_right;
     for (const auto& e : fs::directory_iterator(path_left))
         if (e.path().extension() == ".png") files_left.push_back(e.path().string());

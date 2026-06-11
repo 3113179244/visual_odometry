@@ -7,6 +7,130 @@
 using namespace std;
 using namespace cv;
 
+// ==========================================
+// 新增实现：四叉树节点分裂逻辑
+// ==========================================
+void ExtractorNode::DivideNode(ExtractorNode &n1, ExtractorNode &n2, ExtractorNode &n3, ExtractorNode &n4) {
+    const int halfX = ceil(static_cast<float>(UR.x - UL.x) / 2);
+    const int halfY = ceil(static_cast<float>(BR.y - UL.y) / 2);
+
+    n1.UL = UL; n1.UR = Point2i(UL.x + halfX, UL.y); n1.BL = Point2i(UL.x, UL.y + halfY); n1.BR = Point2i(UL.x + halfX, UL.y + halfY);
+    n2.UL = n1.UR; n2.UR = UR; n2.BL = n1.BR; n2.BR = Point2i(UR.x, UL.y + halfY);
+    n3.UL = n1.BL; n3.UR = n1.BR; n3.BL = BL; n3.BR = Point2i(n1.BR.x, BL.y);
+    n4.UL = n3.UR; n4.UR = n2.BR; n4.BL = n3.BR; n4.BR = BR;
+
+    n1.vKeys.reserve(vKeys.size()); n2.vKeys.reserve(vKeys.size());
+    n3.vKeys.reserve(vKeys.size()); n4.vKeys.reserve(vKeys.size());
+
+    for (size_t i = 0; i < vKeys.size(); i++) {
+        const KeyPoint &kp = vKeys[i];
+        if (kp.pt.x < n1.UR.x) {
+            if (kp.pt.y < n1.BR.y) n1.vKeys.push_back(kp); else n3.vKeys.push_back(kp);
+        } else {
+            if (kp.pt.y < n1.BR.y) n2.vKeys.push_back(kp); else n4.vKeys.push_back(kp);
+        }
+    }
+
+    if (n1.vKeys.size() == 1) n1.bNoMore = true;
+    if (n2.vKeys.size() == 1) n2.bNoMore = true;
+    if (n3.vKeys.size() == 1) n3.bNoMore = true;
+    if (n4.vKeys.size() == 1) n4.bNoMore = true;
+}
+
+// ==========================================
+// 新增实现：四叉树核心分配算法
+// ==========================================
+vector<KeyPoint> StereoVO::DistributeQuadTree(const vector<KeyPoint>& vToDistributeKeys, int minX, int maxX, int minY, int maxY, int N) {
+    if (vToDistributeKeys.size() < (size_t)N) return vToDistributeKeys;
+
+    const int nIni = round(static_cast<float>(maxX - minX) / (maxY - minY));
+    const float hX = static_cast<float>(maxX - minX) / nIni;
+
+    list<ExtractorNode> lNodes;
+    vector<ExtractorNode*> vpIniNodes(nIni);
+
+    for (int i = 0; i < nIni; i++) {
+        ExtractorNode ni;
+        ni.UL = Point2i(hX * static_cast<float>(i), minY);
+        ni.UR = Point2i(hX * static_cast<float>(i + 1), minY);
+        ni.BL = Point2i(ni.UL.x, maxY);
+        ni.BR = Point2i(ni.UR.x, maxY);
+        ni.vKeys.reserve(vToDistributeKeys.size());
+        lNodes.push_back(ni);
+        vpIniNodes[i] = &lNodes.back();
+    }
+
+    for (size_t i = 0; i < vToDistributeKeys.size(); i++) {
+        const KeyPoint &kp = vToDistributeKeys[i];
+        vpIniNodes[kp.pt.x / hX]->vKeys.push_back(kp);
+    }
+
+    auto lit = lNodes.begin();
+    while (lit != lNodes.end()) {
+        if (lit->vKeys.size() == 1) { lit->bNoMore = true; lit++; } 
+        else if (lit->vKeys.empty()) lit = lNodes.erase(lit); 
+        else lit++;
+    }
+
+    bool bFinish = false;
+    int iteration = 0;
+    while (!bFinish) {
+        iteration++;
+        int prevSize = lNodes.size();
+        lit = lNodes.begin();
+        int nToExpand = 0;
+
+        while (lit != lNodes.end()) {
+            if (lit->bNoMore) { lit++; continue; }
+            ExtractorNode n1, n2, n3, n4;
+            lit->DivideNode(n1, n2, n3, n4);
+
+            if (n1.vKeys.size() > 0) { lNodes.push_front(n1); if (n1.vKeys.size() > 1) { nToExpand++; lNodes.front().lit = lNodes.begin(); }}
+            if (n2.vKeys.size() > 0) { lNodes.push_front(n2); if (n2.vKeys.size() > 1) { nToExpand++; lNodes.front().lit = lNodes.begin(); }}
+            if (n3.vKeys.size() > 0) { lNodes.push_front(n3); if (n3.vKeys.size() > 1) { nToExpand++; lNodes.front().lit = lNodes.begin(); }}
+            if (n4.vKeys.size() > 0) { lNodes.push_front(n4); if (n4.vKeys.size() > 1) { nToExpand++; lNodes.front().lit = lNodes.begin(); }}
+
+            lit = lNodes.erase(lit);
+        }
+        if ((int)lNodes.size() >= N || nToExpand == 0) bFinish = true;
+    }
+
+    // 提取叶子节点中响应值最大的点
+    vector<KeyPoint> vResultKeys;
+    vResultKeys.reserve(lNodes.size());
+    for (lit = lNodes.begin(); lit != lNodes.end(); lit++) {
+        vector<KeyPoint> &vNodeKeys = lit->vKeys;
+        KeyPoint* pKP = &vNodeKeys[0];
+        float maxResponse = pKP->response;
+        for (size_t k = 1; k < vNodeKeys.size(); k++) {
+            if (vNodeKeys[k].response > maxResponse) { pKP = &vNodeKeys[k]; maxResponse = vNodeKeys[k].response; }
+        }
+        vResultKeys.push_back(*pKP);
+    }
+    return vResultKeys;
+}
+
+// ==========================================
+// 新增实现：封装完整的 ORB 特征提取流程
+// ==========================================
+void StereoVO::extractORBWithQuadTree(const Mat& img, vector<KeyPoint>& kps, Mat& desc, int num_features) {
+    // 1. 大量提取初始特征点以保证候选充足，并利用 ORB 自带提取机制保留金字塔尺度特性
+    Ptr<ORB> orb_detector = ORB::create(num_features * 4); 
+    vector<KeyPoint> vIniKeys;
+    orb_detector->detect(img, vIniKeys);
+
+    // 2. 通过四叉树筛选出分布均匀的特征点
+    kps = DistributeQuadTree(vIniKeys, 0, img.cols, 0, img.rows, num_features);
+
+    // 3. 计算描述子 (仅针对保留下来的高质量均匀点)
+    Ptr<ORB> orb_descriptor = ORB::create();
+    orb_descriptor->compute(img, kps, desc);
+}
+
+// ==========================================
+// 原有业务函数修改
+// ==========================================
+
 bool StereoVO::loadCalibration(const string& calib_file_path) {
     ifstream file(calib_file_path);
     if (!file.is_open()) return false;
@@ -24,9 +148,11 @@ bool StereoVO::loadCalibration(const string& calib_file_path) {
 }
 
 void StereoVO::matchORB(const Mat& img1, const Mat& img2, vector<KeyPoint>& kps1, vector<KeyPoint>& kps2, vector<DMatch>& good_matches) {
-    Ptr<ORB> orb = ORB::create(2000); Mat desc1, desc2;
-    orb->detectAndCompute(img1, noArray(), kps1, desc1);
-    orb->detectAndCompute(img2, noArray(), kps2, desc2);
+    Mat desc1, desc2;
+    // 替换：使用四叉树均匀化提取特征
+    extractORBWithQuadTree(img1, kps1, desc1, 2000);
+    extractORBWithQuadTree(img2, kps2, desc2, 2000);
+
     if (desc1.empty() || desc2.empty()) return;
     Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
     vector<DMatch> matches; matcher->match(desc1, desc2, matches);
@@ -66,9 +192,9 @@ void StereoVO::trackLocalMap(const Mat& img_curr, const Sophus::SE3d& T_world_pr
                              vector<KeyPoint>& kps_curr, vector<DMatch>& viz_matches) {
     if (local_map.empty()) return;
 
-    Ptr<ORB> orb = ORB::create(2000);
     Mat desc_curr;
-    orb->detectAndCompute(img_curr, noArray(), kps_curr, desc_curr);
+    // 替换：使用四叉树均匀化提取特征
+    extractORBWithQuadTree(img_curr, kps_curr, desc_curr, 2000);
     if (desc_curr.empty()) return;
 
     // 拼接 Local Map 的总描述子矩阵
@@ -93,7 +219,6 @@ void StereoVO::trackLocalMap(const Mat& img_curr, const Sophus::SE3d& T_world_pr
             Point3f p_w = local_map[local_map_idx].pos_world;
             Eigen::Vector3d P_w(p_w.x, p_w.y, p_w.z);
             
-            // 核心变换：把世界坐标系的点，转换到当前预测的相机坐标系下
             Eigen::Vector3d P_c = T_world_predict * P_w;
 
             pts_3d.push_back(Point3f(P_c.x(), P_c.y(), P_c.z()));
@@ -105,9 +230,9 @@ void StereoVO::trackLocalMap(const Mat& img_curr, const Sophus::SE3d& T_world_pr
 
 void StereoVO::updateLocalMap(const vector<Point3f>& pts_3d_cam, const Mat& img_curr_l, 
                              const vector<KeyPoint>& kps_curr_l, const Sophus::SE3d& T_world_curr) {
-    Ptr<ORB> orb = ORB::create(2000);
     Mat desc_curr; vector<KeyPoint> kps_tmp;
-    orb->detectAndCompute(img_curr_l, noArray(), kps_tmp, desc_curr);
+    // 替换：使用四叉树均匀化提取特征
+    extractORBWithQuadTree(img_curr_l, kps_tmp, desc_curr, 2000);
 
     // 世界位姿的逆，即当前相机系转到世界系的矩阵
     Sophus::SE3d T_camera_to_world = T_world_curr.inverse();
@@ -123,7 +248,6 @@ void StereoVO::updateLocalMap(const vector<Point3f>& pts_3d_cam, const Mat& img_
         local_map.push_back(mp);
     }
 
-    // 滑动窗口剔除老旧锚点
     if (local_map.size() > max_local_points) {
         local_map.erase(local_map.begin(), local_map.begin() + (local_map.size() - max_local_points));
     }

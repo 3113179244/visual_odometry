@@ -4,6 +4,8 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <list>      // 新增：用于四叉树节点链表
+#include <cmath>     // 新增：用于数学计算
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
 #include <sophus/se3.hpp>
@@ -12,6 +14,21 @@
 struct MapPoint {
     cv::Point3f pos_world; // 世界坐标系下的绝对 3D 坐标
     cv::Mat descriptor;    // 特征描述子
+};
+
+// ==========================================
+// 新增：四叉树节点结构
+// ==========================================
+class ExtractorNode {
+public:
+    ExtractorNode() : bNoMore(false) {}
+    // 节点分裂函数声明
+    void DivideNode(ExtractorNode &n1, ExtractorNode &n2, ExtractorNode &n3, ExtractorNode &n4);
+
+    cv::Point2i UL, UR, BL, BR;           // 节点边界坐标
+    std::vector<cv::KeyPoint> vKeys;      // 节点内包含的特征点
+    std::list<ExtractorNode>::iterator lit; // 迭代器
+    bool bNoMore;                         // 标志位：是否无法再分
 };
 
 class StereoVO {
@@ -27,6 +44,14 @@ public:
 
     // 解析标定文件
     bool loadCalibration(const std::string& calib_file_path);
+
+    // ==========================================
+    // 新增：四叉树均分与 ORB 提取核心函数
+    // ==========================================
+    std::vector<cv::KeyPoint> DistributeQuadTree(const std::vector<cv::KeyPoint>& vToDistributeKeys, 
+                                                 int minX, int maxX, int minY, int maxY, int N);
+    
+    void extractORBWithQuadTree(const cv::Mat& img, std::vector<cv::KeyPoint>& kps, cv::Mat& desc, int num_features);
 
     // 特征提取与帧间匹配
     void matchORB(const cv::Mat& img1, const cv::Mat& img2, 
