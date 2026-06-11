@@ -1,2 +1,3 @@
 /build/
-
+/data_odometry_poses/
+/trajectory.txt

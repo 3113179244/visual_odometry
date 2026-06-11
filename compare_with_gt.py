@@ -1,75 +1,118 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import argparse
 
-def compare_vo_with_ground_truth():
-    file_vo = 'trajectory.txt'
-    file_gt = '04.txt'
+class KittiEvaluator:
+    def __init__(self, gt_dir, vo_path='trajectory.txt'):
+        """
+        初始化评估器
+        :param gt_dir: KITTI 真值文件存放的根目录
+        :param vo_path: 你的里程计生成的轨迹文件路径
+        """
+        self.gt_dir = gt_dir
+        self.vo_path = vo_path
 
-    # 1. 检查文件
-    if not os.path.exists(file_vo) or not os.path.exists(file_gt):
-        print("❌ 错误：请确保 trajectory.txt 和 07.txt 同时存在于当前目录下！")
-        return
+    def _load_data(self, sequence):
+        """内部方法：加载并对齐数据"""
+        seq_str = f"{int(sequence):02d}"
+        file_gt = os.path.join(self.gt_dir, f"{seq_str}.txt")
 
-    # 2. 读取数据
-    my_data = np.loadtxt(file_vo, comments='#')
-    gt_data = np.loadtxt(file_gt)
+        # 检查文件存在性
+        if not os.path.exists(self.vo_path):
+            raise FileNotFoundError(f"❌ 找不到 VO 轨迹文件: {self.vo_path}")
+        if not os.path.exists(file_gt):
+            raise FileNotFoundError(f"❌ 找不到 KITTI 真值文件: {file_gt}")
 
-    # 3. 截取相同帧数（对齐时间轴）
-    # 你的算法可能因为熔断丢弃、或者只跑了数据集的一部分，需要保证两者数组长度完全一致
-    min_frames = min(len(my_data), len(gt_data))
-    my_data = my_data[:min_frames]
-    gt_data = gt_data[:min_frames]
+        # 读取数据
+        my_data = np.loadtxt(self.vo_path, comments='#')
+        gt_data = np.loadtxt(file_gt)
 
-    print(f"================ 位姿对齐报告 ================")
-    print(f"📊 成功对齐时间步，共同对比帧数: {min_frames} 帧")
+        # 截取最小帧数对齐
+        min_frames = min(len(my_data), len(gt_data))
+        return my_data[:min_frames], gt_data[:min_frames], seq_str, min_frames
 
-    # 4. 提取坐标
-    # 你的里程计坐标 (X, Y, Z)
-    my_x = my_data[:, 0]
-    my_z = my_data[:, 2] # 进深
+    def _compute_metrics(self, my_data, gt_data):
+        """内部方法：提取坐标并计算误差指标"""
+        # 提取 VO 坐标 (假设你的格式: x y z)
+        my_x, my_z = my_data[:, 0], my_data[:, 2]
+        
+        # 提取 GT 坐标 (KITTI 格式: 3x4矩阵展平)
+        gt_x, gt_z = gt_data[:, 3], gt_data[:, 11]
 
-    # KITTI 真值坐标 (从 3x4 变换矩阵中提取：第3列为 X，第11列为 Z)
-    gt_x = gt_data[:, 3]
-    gt_z = gt_data[:, 11]
+        # 计算 ATE (Absolute Trajectory Error)
+        errors = np.sqrt((my_x - gt_x)**2 + (my_z - gt_z)**2)
+        rmse = np.sqrt(np.mean(errors**2))
+        max_error = np.max(errors)
 
-    # 5. 【硬核算法指标】计算绝对轨迹误差 (Absolute Trajectory Error, ATE)
-    # 计算每一帧你的估计值和真实值之间的欧氏距离
-    errors = np.sqrt((my_x - gt_x)**2 + (my_z - gt_z)**2)
-    rmse_error = np.sqrt(np.mean(errors**2))
-    max_error = np.max(errors)
-    
-    print(f"📉 平均绝对轨迹漂移误差 (RMSE): {rmse_error:.3f} 米")
-    print(f"🚨 最大漂移误差 (Max Error): {max_error:.3f} 米")
-    print(f"==============================================")
+        return my_x, my_z, gt_x, gt_z, rmse, max_error
 
-    # 6. 开始高精度画图
-    plt.figure(figsize=(11, 9))
-    
-    # 绘制官方真值轨迹（黑色虚线）
-    plt.plot(gt_x, gt_z, 'k--', linewidth=2.5, label='KITTI Ground Truth (07.txt)', alpha=0.8)
-    
-    # 绘制你手写的里程计轨迹（蓝色实线）
-    plt.plot(my_x, my_z, color='dodgerblue', linewidth=2.0, label='My Stereo VO (trajectory.txt)')
-    
-    # 特别标记起点
-    plt.plot(gt_x[0], gt_z[0], 'go', markersize=10, label='Start Point (0, 0, 0)')
-    # 标记两者的终点
-    plt.plot(gt_x[-1], gt_z[-1], 'ks', markersize=8, label='GT End')
-    plt.plot(my_x[-1], my_z[-1], 'ro', markersize=8, label='Your VO End')
+    def _plot_trajectory(self, my_x, my_z, gt_x, gt_z, seq_str):
+        """内部方法：渲染绘图"""
+        plt.figure(figsize=(11, 9))
+        
+        # 绘制轨迹
+        plt.plot(gt_x, gt_z, 'k--', linewidth=2.5, label=f'GT (Seq {seq_str})', alpha=0.8)
+        plt.plot(my_x, my_z, color='dodgerblue', linewidth=2.0, label='Stereo VO')
+        
+        # 标记关键点
+        plt.plot(gt_x[0], gt_z[0], 'go', markersize=10, label='Start (0,0,0)')
+        plt.plot(gt_x[-1], gt_z[-1], 'ks', markersize=8, label='GT End')
+        plt.plot(my_x[-1], my_z[-1], 'ro', markersize=8, label='VO End')
 
-    # 图表细节装饰
-    plt.title("Stereo VO vs KITTI Ground Truth (Sequence 07)", fontsize=14, fontweight='bold')
-    plt.xlabel("X (Left / Right) [meters]", fontsize=12)
-    plt.ylabel("Z (Forward) [meters]", fontsize=12)
-    plt.grid(True, linestyle=':', alpha=0.6)
-    plt.legend(loc='upper right', fontsize=11)
-    
-    # 🌟 再次强调：必须等比例，否则无法看出真正的漂移趋势
-    plt.axis('equal')
-    
-    print("🖥️  正在渲染对比曲线，请查看弹窗...")
-    plt.show()
+        # 图表设置
+        plt.title(f"Stereo VO vs KITTI Ground Truth (Sequence {seq_str})", fontsize=14, fontweight='bold')
+        plt.xlabel("X (Left / Right) [meters]")
+        plt.ylabel("Z (Forward) [meters]")
+        plt.grid(True, linestyle=':', alpha=0.6)
+        plt.legend(loc='upper right')
+        plt.axis('equal')
+        
+        plt.show()
+
+    def evaluate(self, sequence):
+        """
+        核心对外接口：执行一键评估
+        :param sequence: 序列号，支持数字 6 或字符串 '06'
+        """
+        try:
+            print(f"\n🚀 开始评估 Sequence {sequence} ...")
+            
+            # 1. 获取数据
+            my_data, gt_data, seq_str, frames = self._load_data(sequence)
+            print(f"📊 成功对齐时间步，共同对比帧数: {frames} 帧")
+
+            # 2. 计算误差
+            my_x, my_z, gt_x, gt_z, rmse, max_err = self._compute_metrics(my_data, gt_data)
+            print("-" * 40)
+            print(f"📉 RMSE (平均漂移): {rmse:.3f} m")
+            print(f"🚨 Max Error (最大漂移): {max_err:.3f} m")
+            print("-" * 40)
+
+            # 3. 绘图显示
+            print("🖥️  正在渲染对比曲线...")
+            self._plot_trajectory(my_x, my_z, gt_x, gt_z, seq_str)
+
+        except Exception as e:
+            print(e)
+
 
 if __name__ == '__main__':
-    compare_vo_with_ground_truth()
+    # 配置绝对路径
+    GT_DIRECTORY = '/home/wzj/stereovo/data_odometry_poses/dataset/poses'
+    
+    # 实例化评估器
+    evaluator = KittiEvaluator(gt_dir=GT_DIRECTORY, vo_path='trajectory.txt')
+
+    # ==========================================
+    # 🌟 极简调用方式：想换哪个序列，直接改这里的数字即可
+    # ==========================================
+    
+    evaluator.evaluate(3)  # 直接传数字 6 即可，自动对应 06.txt
+    
+    # 如果你想通过命令行运行 (例如 python script.py --seq 06)
+    # 也可以取消下方代码的注释：
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--seq", type=str, default="06")
+    # args = parser.parse_args()
+    # evaluator.evaluate(args.seq)

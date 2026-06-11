@@ -16,7 +16,7 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 include_directories(${CERES_INCLUDE_DIRS})
 
 # 声明可执行文件
-add_executable(main main.cpp pose_optimizer.cpp stereo_vo.cpp)
+add_executable(main main.cpp pose_optimizer.cpp stereo_vo.cpp keyframe_selector.cpp slide_window.cpp)
 
 # 链接所有的库
 target_link_libraries(main 

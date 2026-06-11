@@ -115,7 +115,7 @@ vector<KeyPoint> StereoVO::DistributeQuadTree(const vector<KeyPoint>& vToDistrib
 // ==========================================
 void StereoVO::extractORBWithQuadTree(const Mat& img, vector<KeyPoint>& kps, Mat& desc, int num_features) {
     // 1. 大量提取初始特征点以保证候选充足，并利用 ORB 自带提取机制保留金字塔尺度特性
-    Ptr<ORB> orb_detector = ORB::create(num_features * 4); 
+    Ptr<ORB> orb_detector = ORB::create(num_features * 2); 
     vector<KeyPoint> vIniKeys;
     orb_detector->detect(img, vIniKeys);
 
