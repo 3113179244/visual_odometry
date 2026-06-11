@@ -72,6 +72,10 @@ public:
     // 局部地图更新核心：将当前帧优化对齐后的高精度新点存回地图
     void updateLocalMap(const std::vector<cv::Point3f>& pts_3d_cam, const cv::Mat& img_curr_l, 
                         const std::vector<cv::KeyPoint>& kps_curr_l, const Sophus::SE3d& T_world_curr);
+    
+    // 新增：直接使用描述子进行匹配，避免重复提取特征
+    void matchDescriptors(const cv::Mat& desc1, const cv::Mat& desc2, 
+                          std::vector<cv::DMatch>& good_matches);
 };
 
 #endif // STEREO_VO_H

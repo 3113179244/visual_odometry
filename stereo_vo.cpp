@@ -150,8 +150,11 @@ bool StereoVO::loadCalibration(const string& calib_file_path) {
 void StereoVO::matchORB(const Mat& img1, const Mat& img2, vector<KeyPoint>& kps1, vector<KeyPoint>& kps2, vector<DMatch>& good_matches) {
     Mat desc1, desc2;
     // 替换：使用四叉树均匀化提取特征
-    extractORBWithQuadTree(img1, kps1, desc1, 2000);
-    extractORBWithQuadTree(img2, kps2, desc2, 2000);
+    std::thread t_left([&]() { this->extractORBWithQuadTree(img1, kps1, desc1, 2000); });
+    std::thread t_right([&]() { this->extractORBWithQuadTree(img2, kps2, desc2, 2000); });
+    
+    t_left.join();
+    t_right.join();
 
     if (desc1.empty() || desc2.empty()) return;
     Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
@@ -252,4 +255,22 @@ void StereoVO::updateLocalMap(const vector<Point3f>& pts_3d_cam, const Mat& img_
         local_map.erase(local_map.begin(), local_map.begin() + (local_map.size() - max_local_points));
     }
     cout << " 📌 [Local Map] 缓存池中有效 3D 锚点总数: " << local_map.size() << endl;
+}
+
+void StereoVO::matchDescriptors(const Mat& desc1, const Mat& desc2, vector<DMatch>& good_matches) {
+    if (desc1.empty() || desc2.empty()) return;
+    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
+    vector<DMatch> matches; 
+    matcher->match(desc1, desc2, matches);
+    
+    double min_dist = 10000;
+    for (int i = 0; i < desc1.rows; i++) {
+        if (matches[i].distance < min_dist) min_dist = matches[i].distance;
+    }
+    good_matches.clear();
+    for (int i = 0; i < desc1.rows; i++) {
+        if (matches[i].distance <= max(2 * min_dist, 30.0)) {
+            good_matches.push_back(matches[i]);
+        }
+    }
 }
