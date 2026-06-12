@@ -1,15 +1,13 @@
 #include "stereo_vo.h"
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include <opencv2/calib3d/calib3d.hpp>
 #include <opencv2/core/eigen.hpp>
 
 using namespace std;
 using namespace cv;
 
-// ==========================================
-// 新增实现：四叉树节点分裂逻辑
-// ==========================================
 void ExtractorNode::DivideNode(ExtractorNode &n1, ExtractorNode &n2, ExtractorNode &n3, ExtractorNode &n4) {
     const int halfX = ceil(static_cast<float>(UR.x - UL.x) / 2);
     const int halfY = ceil(static_cast<float>(BR.y - UL.y) / 2);
@@ -37,9 +35,6 @@ void ExtractorNode::DivideNode(ExtractorNode &n1, ExtractorNode &n2, ExtractorNo
     if (n4.vKeys.size() == 1) n4.bNoMore = true;
 }
 
-// ==========================================
-// 新增实现：四叉树核心分配算法
-// ==========================================
 vector<KeyPoint> StereoVO::DistributeQuadTree(const vector<KeyPoint>& vToDistributeKeys, int minX, int maxX, int minY, int maxY, int N) {
     if (vToDistributeKeys.size() < (size_t)N) return vToDistributeKeys;
 
@@ -73,13 +68,9 @@ vector<KeyPoint> StereoVO::DistributeQuadTree(const vector<KeyPoint>& vToDistrib
     }
 
     bool bFinish = false;
-    int iteration = 0;
     while (!bFinish) {
-        iteration++;
-        int prevSize = lNodes.size();
-        lit = lNodes.begin();
         int nToExpand = 0;
-
+        lit = lNodes.begin();
         while (lit != lNodes.end()) {
             if (lit->bNoMore) { lit++; continue; }
             ExtractorNode n1, n2, n3, n4;
@@ -95,7 +86,6 @@ vector<KeyPoint> StereoVO::DistributeQuadTree(const vector<KeyPoint>& vToDistrib
         if ((int)lNodes.size() >= N || nToExpand == 0) bFinish = true;
     }
 
-    // 提取叶子节点中响应值最大的点
     vector<KeyPoint> vResultKeys;
     vResultKeys.reserve(lNodes.size());
     for (lit = lNodes.begin(); lit != lNodes.end(); lit++) {
@@ -110,26 +100,14 @@ vector<KeyPoint> StereoVO::DistributeQuadTree(const vector<KeyPoint>& vToDistrib
     return vResultKeys;
 }
 
-// ==========================================
-// 新增实现：封装完整的 ORB 特征提取流程
-// ==========================================
 void StereoVO::extractORBWithQuadTree(const Mat& img, vector<KeyPoint>& kps, Mat& desc, int num_features) {
-    // 1. 大量提取初始特征点以保证候选充足，并利用 ORB 自带提取机制保留金字塔尺度特性
     Ptr<ORB> orb_detector = ORB::create(num_features * 2); 
     vector<KeyPoint> vIniKeys;
     orb_detector->detect(img, vIniKeys);
-
-    // 2. 通过四叉树筛选出分布均匀的特征点
     kps = DistributeQuadTree(vIniKeys, 0, img.cols, 0, img.rows, num_features);
-
-    // 3. 计算描述子 (仅针对保留下来的高质量均匀点)
     Ptr<ORB> orb_descriptor = ORB::create();
     orb_descriptor->compute(img, kps, desc);
 }
-
-// ==========================================
-// 原有业务函数修改
-// ==========================================
 
 bool StereoVO::loadCalibration(const string& calib_file_path) {
     ifstream file(calib_file_path);
@@ -149,12 +127,9 @@ bool StereoVO::loadCalibration(const string& calib_file_path) {
 
 void StereoVO::matchORB(const Mat& img1, const Mat& img2, vector<KeyPoint>& kps1, vector<KeyPoint>& kps2, vector<DMatch>& good_matches) {
     Mat desc1, desc2;
-    // 替换：使用四叉树均匀化提取特征
     std::thread t_left([&]() { this->extractORBWithQuadTree(img1, kps1, desc1, 2000); });
     std::thread t_right([&]() { this->extractORBWithQuadTree(img2, kps2, desc2, 2000); });
-    
-    t_left.join();
-    t_right.join();
+    t_left.join(); t_right.join();
 
     if (desc1.empty() || desc2.empty()) return;
     Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
@@ -178,10 +153,7 @@ void StereoVO::build3D2DPoints(const vector<KeyPoint>& kps1_l, const vector<KeyP
                 if (disparity <= 0.0) continue;
                 double z = (fx * baseline) / disparity;
                 if (z < 0.5 || z > 80.0) continue;
-                double x = (kps1_l[idx_l1].pt.x - cx) * z / fx;
-                double y = (kps1_l[idx_l1].pt.y - cy) * z / fy;
-
-                pts_3d.push_back(Point3f(x, y, z));
+                pts_3d.push_back(Point3f((kps1_l[idx_l1].pt.x - cx) * z / fx, (kps1_l[idx_l1].pt.y - cy) * z / fy, z));
                 pts_2d.push_back(kps2_l[idx_l2].pt);
                 viz_matches.push_back(t_m); 
                 break;
@@ -190,150 +162,39 @@ void StereoVO::build3D2DPoints(const vector<KeyPoint>& kps1_l, const vector<KeyP
     }
 }
 
-void StereoVO::trackLocalMap(const Mat& img_curr, const Sophus::SE3d& T_world_predict, 
-                             vector<Point3f>& pts_3d, vector<Point2f>& pts_2d,
-                             vector<KeyPoint>& kps_curr, vector<DMatch>& viz_matches) {
-    if (local_map.empty()) return;
-
-    Mat desc_curr;
-    extractORBWithQuadTree(img_curr, kps_curr, desc_curr, 2000); //
-    if (desc_curr.empty()) return; //
-
-    // ========================================================
-    // 核心重构：过滤坏点，并记录“压缩描述子”与“原始地图”的索引映射
-    // ========================================================
-    Mat desc_local;
-    vector<int> valid_local_indices; // 记录 desc_local 的每一行对应真实 local_map 的哪个绝对下标
-    
-    {
-        std::shared_lock<std::shared_mutex> lock(map_mutex); // 读锁保护
-        for (size_t i = 0; i < local_map.size(); ++i) {
-            if (local_map[i].is_bad) continue; // 🌟 过滤坏点！
-            
-            desc_local.push_back(local_map[i].descriptor);
-            valid_local_indices.push_back(i);
-        }
-    }
-
-    if (desc_local.empty()) return; // 如果全部被剔除光了，直接退出
-
-    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming"); //
-    vector<DMatch> matches;
-    matcher->match(desc_local, desc_curr, matches); //
-    if (matches.empty()) return; //
-
-    double min_dist = 10000; //
-    for (size_t i = 0; i < matches.size(); i++) if (matches[i].distance < min_dist) min_dist = matches[i].distance; //
-
-    for (const auto& m : matches) {
-        if (m.distance <= max(2 * min_dist, 30.0)) { //
-            int compressed_idx = m.queryIdx; // 匹配器返回的是 desc_local 的行号
-            int curr_kp_idx = m.trainIdx;    //
-
-            // 🌟 映射回全局真实的地图点索引
-            int local_map_idx = valid_local_indices[compressed_idx];
-
-            Point3f p_w;
-            {
-                std::shared_lock<std::shared_mutex> lock(map_mutex);
-                p_w = local_map[local_map_idx].pos_world;
-            }
-            
-            Eigen::Vector3d P_w(p_w.x, p_w.y, p_w.z); //
-            Eigen::Vector3d P_c = T_world_predict * P_w; //
-
-            pts_3d.push_back(Point3f(P_c.x(), P_c.y(), P_c.z())); //
-            pts_2d.push_back(kps_curr[curr_kp_idx].pt); //
-            viz_matches.push_back(m); //
-        }
-    }
-}
-
-void StereoVO::updateLocalMap(const vector<Point3f>& pts_3d_cam, const Mat& img_curr_l, 
-                             const vector<KeyPoint>& kps_curr_l, const Sophus::SE3d& T_world_curr) {
-    Mat desc_curr; vector<KeyPoint> kps_tmp;
-    // 替换：使用四叉树均匀化提取特征
-    extractORBWithQuadTree(img_curr_l, kps_tmp, desc_curr, 2000);
-
-    // 世界位姿的逆，即当前相机系转到世界系的矩阵
-    Sophus::SE3d T_camera_to_world = T_world_curr.inverse();
-    std::unique_lock<std::shared_mutex> lock(map_mutex);                               
-    for (size_t i = 0; i < pts_3d_cam.size() && i < (size_t)desc_curr.rows; ++i) {
-        Eigen::Vector3d P_c(pts_3d_cam[i].x, pts_3d_cam[i].y, pts_3d_cam[i].z);
-        Eigen::Vector3d P_w = T_camera_to_world * P_c; 
-
-        MapPoint mp;
-        mp.pos_world = Point3f(P_w.x(), P_w.y(), P_w.z());
-        mp.descriptor = desc_curr.row(i).clone();
-
-        local_map.push_back(mp);
-    }
-
-    if (local_map.size() > max_local_points) {
-        local_map.erase(local_map.begin(), local_map.begin() + (local_map.size() - max_local_points));
-    }
-    cout << " 📌 [Local Map] 缓存池中有效 3D 锚点总数: " << local_map.size() << endl;
-}
-
 void StereoVO::matchDescriptors(const Mat& desc1, const Mat& desc2, vector<DMatch>& good_matches) {
     if (desc1.empty() || desc2.empty()) return;
     Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
-    vector<DMatch> matches; 
-    matcher->match(desc1, desc2, matches);
-    
+    vector<DMatch> matches; matcher->match(desc1, desc2, matches);
     double min_dist = 10000;
-    for (int i = 0; i < desc1.rows; i++) {
-        if (matches[i].distance < min_dist) min_dist = matches[i].distance;
-    }
+    for (int i = 0; i < desc1.rows; i++) if (matches[i].distance < min_dist) min_dist = matches[i].distance;
     good_matches.clear();
-    for (int i = 0; i < desc1.rows; i++) {
-        if (matches[i].distance <= max(2 * min_dist, 30.0)) {
-            good_matches.push_back(matches[i]);
-        }
-    }
+    for (int i = 0; i < desc1.rows; i++) if (matches[i].distance <= max(2 * min_dist, 30.0)) good_matches.push_back(matches[i]);
 }
 
-// ==========================================
-// 新增实现：极线约束双目加速匹配
-// ==========================================
 void StereoVO::matchStereoEpipolar(const vector<KeyPoint>& kps_l, const vector<KeyPoint>& kps_r,
                                    const Mat& desc_l, const Mat& desc_r,
                                    vector<DMatch>& good_matches, float max_v_disp) {
     good_matches.clear();
-    const int TH_LOW = 50; // 汉明距离阈值
+    const int TH_LOW = 50;
 
     for (size_t i = 0; i < kps_l.size(); i++) {
         const KeyPoint& kp_l = kps_l[i];
-        int best_dist = 256;
-        int best_idx = -1;
+        int best_dist = 256; int best_idx = -1;
 
         for (size_t j = 0; j < kps_r.size(); j++) {
             const KeyPoint& kp_r = kps_r[j];
-            
-            // 1. 极线约束：水平对齐的双目相机，其特征点 y 坐标差异极小
             if (abs(kp_l.pt.y - kp_r.pt.y) > max_v_disp) continue;
-            
-            // 2. 视差约束：左图特征点的 x 一定大于右图对应的 x
             float disp = kp_l.pt.x - kp_r.pt.x;
             if (disp <= 0.0f) continue;
 
-            // 3. 描述子计算 (仅对满足几何约束的点)
             int dist = cv::norm(desc_l.row(i), desc_r.row(j), cv::NORM_HAMMING);
-            if (dist < best_dist) {
-                best_dist = dist;
-                best_idx = j;
-            }
+            if (dist < best_dist) { best_dist = dist; best_idx = j; }
         }
-        
-        if (best_idx >= 0 && best_dist < TH_LOW) {
-            good_matches.push_back(DMatch(i, best_idx, best_dist));
-        }
+        if (best_idx >= 0 && best_dist < TH_LOW) good_matches.push_back(DMatch(i, best_idx, best_dist));
     }
 }
 
-// ==========================================
-// 新增实现：恒速模型 + 投影加速帧间匹配
-// ==========================================
 void StereoVO::matchTemporalByProjection(const vector<KeyPoint>& kps_prev, 
                                          const vector<Point3f>& pts_3d_prev,
                                          const Mat& desc_prev, 
@@ -344,47 +205,31 @@ void StereoVO::matchTemporalByProjection(const vector<KeyPoint>& kps_prev,
                                          vector<DMatch>& temporal_matches,
                                          float search_radius) {
     temporal_matches.clear();
-    double fx_ = K.at<double>(0, 0);
-    double fy_ = K.at<double>(1, 1);
-    double cx_ = K.at<double>(0, 2);
-    double cy_ = K.at<double>(1, 2);
+    double fx_ = K.at<double>(0, 0); double fy_ = K.at<double>(1, 1);
+    double cx_ = K.at<double>(0, 2); double cy_ = K.at<double>(1, 2);
     const int TH_LOW = 50;
 
     for (size_t i = 0; i < pts_3d_prev.size(); i++) {
         const Point3f& pt3d = pts_3d_prev[i];
-        if (pt3d.z <= 0) continue; // 如果 Z <= 0 说明该点在上一帧没有成功生成 3D 坐标
+        if (pt3d.z <= 0) continue;
 
-        // 将上一帧的 3D 点乘上预测的运动模型 (上一帧系 -> 当前帧系)
         Eigen::Vector3d p_prev(pt3d.x, pt3d.y, pt3d.z);
         Eigen::Vector3d p_curr = T_curr_prev * p_prev;
+        if (p_curr.z() <= 0.1) continue;
 
-        if (p_curr.z() <= 0.1) continue; // 运动后点跑到相机背后了，跳过
-
-        // 透视投影到像素平面
         double u_pred = fx_ * p_curr.x() / p_curr.z() + cx_;
         double v_pred = fy_ * p_curr.y() / p_curr.z() + cy_;
 
-        int best_dist = 256;
-        int best_idx = -1;
+        int best_dist = 256; int best_idx = -1;
 
-        // 仅在投影点周围 search_radius 半径内寻找匹配特征点
         for (size_t j = 0; j < kps_curr.size(); j++) {
             const KeyPoint& kp_curr = kps_curr[j];
-            double du = kp_curr.pt.x - u_pred;
-            double dv = kp_curr.pt.y - v_pred;
-            
-            // 距离过滤器
+            double du = kp_curr.pt.x - u_pred; double dv = kp_curr.pt.y - v_pred;
             if (du * du + dv * dv > search_radius * search_radius) continue;
 
             int dist = cv::norm(desc_prev.row(i), desc_curr.row(j), cv::NORM_HAMMING);
-            if (dist < best_dist) {
-                best_dist = dist;
-                best_idx = j;
-            }
+            if (dist < best_dist) { best_dist = dist; best_idx = j; }
         }
-
-        if (best_idx >= 0 && best_dist < TH_LOW) {
-            temporal_matches.push_back(DMatch(i, best_idx, best_dist));
-        }
+        if (best_idx >= 0 && best_dist < TH_LOW) temporal_matches.push_back(DMatch(i, best_idx, best_dist));
     }
 }
