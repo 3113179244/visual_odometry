@@ -1,4 +1,3 @@
-// main.cpp (修正版)
 #include <iostream>
 #include <vector>
 #include <string>
@@ -56,15 +55,15 @@ atomic<bool> system_running{true};
 void TrackingThread()
 {
     StereoVO vo;
-    if (!vo.loadCalibration("/home/wzj/KITTI/data_odometry_gray/dataset/sequences/03/calib.txt"))
+    if (!vo.loadCalibration("/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/calib.txt"))
     {
         cerr << "标定加载失败!" << endl;
         system_running = false;
         return;
     }
 
-    string path_left = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/03/image_0";
-    string path_right = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/03/image_1";
+    string path_left = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/image_0";
+    string path_right = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/image_1";
     vector<string> files_left, files_right;
     for (const auto &e : fs::directory_iterator(path_left))
         if (e.path().extension() == ".png")
@@ -80,16 +79,17 @@ void TrackingThread()
     Sophus::SE3d global_pose;
     traj_out << 0.0 << " " << 0.0 << " " << 0.0 << endl;
 
+    // 恒速运动模型：保存上一帧到当前帧的相对运动
+    Sophus::SE3d last_delta_T; 
+
     int max_frames = files_left.size() - 1;
     cout << "== 追踪线程启动，共 " << max_frames << " 帧 ==" << endl;
 
-    // 关键帧管理初始化
     int img_width = imread(files_left[0], IMREAD_GRAYSCALE).cols;
     int img_height = imread(files_left[0], IMREAD_GRAYSCALE).rows;
     KeyframeSelector selector(vo.fx, vo.fy, vo.cx, vo.cy, vo.baseline, img_width, img_height);
     selector.setParameters(10.0, 0.15, 30, 15.0, 0.5, 6, 8, 0.35, 0.85);
 
-    // 创建滑动窗口优化器（窗口大小10）
     SlidingWindow slide_win(10, vo.K, vo.baseline, vo.local_map);
 
     vector<Keyframe> window_keyframes;
@@ -103,29 +103,36 @@ void TrackingThread()
     Mat desc_prev_l, desc_prev_r;
     vector<DMatch> stereo_matches;
 
-    thread t_init_l([&]()
-                    { vo.extractORBWithQuadTree(img_prev_l, kps_prev_l, desc_prev_l, 2000); });
-    thread t_init_r([&]()
-                    { vo.extractORBWithQuadTree(img_prev_r, kps_prev_r, desc_prev_r, 2000); });
+    thread t_init_l([&]() { vo.extractORBWithQuadTree(img_prev_l, kps_prev_l, desc_prev_l, 2000); });
+    thread t_init_r([&]() { vo.extractORBWithQuadTree(img_prev_r, kps_prev_r, desc_prev_r, 2000); });
     t_init_l.join();
     t_init_r.join();
-    vo.matchDescriptors(desc_prev_l, desc_prev_r, stereo_matches);
+    
+    // 【修改】使用极线加速双目匹配
+    vo.matchStereoEpipolar(kps_prev_l, kps_prev_r, desc_prev_l, desc_prev_r, stereo_matches);
 
-    vector<DMatch> empty_temporal;
+    // 【新增】提前构建上一帧（此时为第0帧）对应的相机系 3D 点池
+    vector<Point3f> pts_3d_prev(kps_prev_l.size(), Point3f(0, 0, 0));
     vector<Point3f> init_pts_3d_cam;
-    vector<Point2f> dummy_pts_2d;
-    vector<DMatch> dummy_viz;
-    vo.build3D2DPoints(kps_prev_l, kps_prev_r, kps_prev_l,
-                       stereo_matches, empty_temporal,
-                       init_pts_3d_cam, dummy_pts_2d, dummy_viz);
+    for (const auto& sm : stereo_matches) {
+        int idx_l = sm.queryIdx;
+        int idx_r = sm.trainIdx;
+        double disparity = kps_prev_l[idx_l].pt.x - kps_prev_r[idx_r].pt.x;
+        if (disparity > 0) {
+            double z = (vo.fx * vo.baseline) / disparity;
+            double x = (kps_prev_l[idx_l].pt.x - vo.cx) * z / vo.fx;
+            double y = (kps_prev_l[idx_l].pt.y - vo.cy) * z / vo.fy;
+            pts_3d_prev[idx_l] = Point3f(x, y, z);
+            init_pts_3d_cam.push_back(pts_3d_prev[idx_l]); // 用于初次建立 Local Map
+        }
+    }
 
     Sophus::SE3d identity_pose;
     vo.updateLocalMap(init_pts_3d_cam, img_prev_l, kps_prev_l, identity_pose);
 
     vector<int> prev_mp_indices(kps_prev_l.size(), -1);
     size_t base_idx = vo.local_map.size() - init_pts_3d_cam.size();
-    for (size_t i = 0; i < init_pts_3d_cam.size(); ++i)
-    {
+    for (size_t i = 0; i < init_pts_3d_cam.size(); ++i) {
         prev_mp_indices[i] = base_idx + i;
     }
 
@@ -135,7 +142,6 @@ void TrackingThread()
     Keyframe first_kf(0, rvec_init, tvec_init, kps_prev_2d, prev_mp_indices);
     window_keyframes.push_back(first_kf);
     last_keyframe_ptr = &window_keyframes.back();
-    // 将第一帧也加入滑动窗口优化器
     slide_win.addKeyframe(first_kf);
     cout << "第一帧已作为关键帧插入，local_map 大小: " << vo.local_map.size() << endl;
 
@@ -144,35 +150,40 @@ void TrackingThread()
     {
         Mat img_curr_l = imread(files_left[i], IMREAD_GRAYSCALE);
         Mat img_curr_r = imread(files_right[i], IMREAD_GRAYSCALE);
-        if (img_curr_l.empty() || img_curr_r.empty())
-            break;
+        if (img_curr_l.empty() || img_curr_r.empty()) break;
 
         vector<KeyPoint> kps_curr_l, kps_curr_r;
         Mat desc_curr_l, desc_curr_r;
-        thread t_l([&]()
-                   { vo.extractORBWithQuadTree(img_curr_l, kps_curr_l, desc_curr_l, 2000); });
-        thread t_r([&]()
-                   { vo.extractORBWithQuadTree(img_curr_r, kps_curr_r, desc_curr_r, 2000); });
+        thread t_l([&]() { vo.extractORBWithQuadTree(img_curr_l, kps_curr_l, desc_curr_l, 2000); });
+        thread t_r([&]() { vo.extractORBWithQuadTree(img_curr_r, kps_curr_r, desc_curr_r, 2000); });
         t_l.join();
         t_r.join();
 
+        // 【修改】使用时序投影匹配，代替原先的全局描述子匹配
         vector<DMatch> temporal_matches;
-        vo.matchDescriptors(desc_prev_l, desc_curr_l, temporal_matches);
+        vo.matchTemporalByProjection(kps_prev_l, pts_3d_prev, desc_prev_l, 
+                                     kps_curr_l, desc_curr_l, 
+                                     last_delta_T, vo.K, temporal_matches, 15.0f);
 
+        // 【修改】直接解析投影匹配的结果
         vector<Point3f> pts_3d_cam;
         vector<Point2f> pts_2d_curr;
         vector<DMatch> viz_matches;
-        vo.build3D2DPoints(kps_prev_l, kps_prev_r, kps_curr_l,
-                           stereo_matches, temporal_matches,
-                           pts_3d_cam, pts_2d_curr, viz_matches);
 
+        for (const auto& tm : temporal_matches) {
+            int idx_prev = tm.queryIdx;
+            int idx_curr = tm.trainIdx;
+            pts_3d_cam.push_back(pts_3d_prev[idx_prev]);     // 取出上一帧的 3D 点
+            pts_2d_curr.push_back(kps_curr_l[idx_curr].pt);  // 对应当前的像素坐标
+            viz_matches.push_back(tm);
+        }
+
+        // 维护 Local Map 索引关系
         vector<int> curr_mp_indices(kps_curr_l.size(), -1);
-        for (const auto &match : temporal_matches)
-        {
+        for (const auto &match : temporal_matches) {
             int prev_idx = match.queryIdx;
             int curr_idx = match.trainIdx;
-            if (prev_idx < (int)prev_mp_indices.size() && prev_mp_indices[prev_idx] != -1)
-            {
+            if (prev_idx < (int)prev_mp_indices.size() && prev_mp_indices[prev_idx] != -1) {
                 curr_mp_indices[curr_idx] = prev_mp_indices[prev_idx];
             }
         }
@@ -194,6 +205,10 @@ void TrackingThread()
                     cv::cv2eigen(R_pnp, R_eigen);
                     Eigen::Vector3d t_eigen(tvec_pnp.at<double>(0, 0), tvec_pnp.at<double>(1, 0), tvec_pnp.at<double>(2, 0));
                     Sophus::SE3d T_cw(R_eigen, t_eigen);
+                    
+                    // 【新增】更新恒速运动模型：T_cw 恰好就是上一帧到当前帧的相对运动 (T_curr_prev)
+                    last_delta_T = T_cw;
+
                     global_pose = global_pose * T_cw.inverse();
                     rvec_curr = rvec_pnp.clone();
                     tvec_curr = tvec_pnp.clone();
@@ -202,19 +217,16 @@ void TrackingThread()
             }
         }
 
-        if (!tracking_success)
-        {
-            cout << "⚠️ 警告 [帧 " << i << "]: 触发位姿防暴走熔断！保持上一帧位姿" << endl;
-            if (last_keyframe_ptr)
-            {
+        if (!tracking_success) {
+            cout << "⚠️ 警告 [帧 " << i << "]: 触发位姿防暴走熔断！" << endl;
+            if (last_keyframe_ptr) {
                 rvec_curr = last_keyframe_ptr->rvec.clone();
                 tvec_curr = last_keyframe_ptr->tvec.clone();
-            }
-            else
-            {
+            } else {
                 rvec_curr = Mat::zeros(3, 1, CV_64F);
                 tvec_curr = Mat::zeros(3, 1, CV_64F);
             }
+            // 追踪失败时，不更新 last_delta_T，保持原有速度预测
         }
 
         traj_out << global_pose.translation().x() << " "
@@ -223,32 +235,21 @@ void TrackingThread()
 
         // 关键帧决策
         vector<int> matched_indices;
-        for (int idx : curr_mp_indices)
-            if (idx != -1)
-                matched_indices.push_back(idx);
+        for (int idx : curr_mp_indices) if (idx != -1) matched_indices.push_back(idx);
         vector<Point2f> curr_kps_2d = points2f_from_kps(kps_curr_l);
         vector<Point3f> local_map_world = getLocalMapWorldPoints(vo);
 
         bool is_keyframe = false;
-        if (i > 1)
-        {
-            is_keyframe = selector.decide(rvec_curr, tvec_curr,
-                                          curr_kps_2d,
-                                          matched_indices,
-                                          local_map_world,
-                                          last_keyframe_ptr,
-                                          window_keyframes,
-                                          false);
+        if (i > 1) {
+            is_keyframe = selector.decide(rvec_curr, tvec_curr, curr_kps_2d, matched_indices,
+                                          local_map_world, last_keyframe_ptr, window_keyframes, false);
         }
 
-        if (is_keyframe)
-        {
+        if (is_keyframe) {
             Keyframe new_kf(i, rvec_curr, tvec_curr, curr_kps_2d, matched_indices);
             window_keyframes.push_back(new_kf);
-            if (window_keyframes.size() > max_window_size)
-                window_keyframes.erase(window_keyframes.begin());
+            if (window_keyframes.size() > max_window_size) window_keyframes.erase(window_keyframes.begin());
             last_keyframe_ptr = &window_keyframes.back();
-            // 添加到滑动窗口（内部会触发局部BA优化）
             slide_win.addKeyframe(new_kf);
             cout << "📸 关键帧插入: 帧 " << i << ", 窗口大小=" << window_keyframes.size() << endl;
         }
@@ -262,6 +263,24 @@ void TrackingThread()
             shared_viz_img = img_viz.clone();
         }
 
+        // ==========================================
+        // 【新增】为下一帧做准备：计算当前帧的双目极线匹配，提取 3D 点
+        // ==========================================
+        vo.matchStereoEpipolar(kps_curr_l, kps_curr_r, desc_curr_l, desc_curr_r, stereo_matches);
+        
+        pts_3d_prev.assign(kps_curr_l.size(), Point3f(0, 0, 0)); // 初始化全 0
+        for (const auto& sm : stereo_matches) {
+            int idx_l = sm.queryIdx;
+            int idx_r = sm.trainIdx;
+            double disparity = kps_curr_l[idx_l].pt.x - kps_curr_r[idx_r].pt.x;
+            if (disparity > 0) {
+                double z = (vo.fx * vo.baseline) / disparity;
+                double x = (kps_curr_l[idx_l].pt.x - vo.cx) * z / vo.fx;
+                double y = (kps_curr_l[idx_l].pt.y - vo.cy) * z / vo.fy;
+                pts_3d_prev[idx_l] = Point3f(x, y, z);
+            }
+        }
+
         // 状态滚动
         img_prev_l = img_curr_l.clone();
         kps_prev_l = kps_curr_l;
@@ -269,7 +288,6 @@ void TrackingThread()
         desc_prev_l = desc_curr_l.clone();
         desc_prev_r = desc_curr_r.clone();
         prev_mp_indices = std::move(curr_mp_indices);
-        vo.matchDescriptors(desc_prev_l, desc_prev_r, stereo_matches);
 
         this_thread::sleep_for(chrono::milliseconds(10));
     }

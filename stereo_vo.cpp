@@ -274,3 +274,99 @@ void StereoVO::matchDescriptors(const Mat& desc1, const Mat& desc2, vector<DMatc
         }
     }
 }
+
+// ==========================================
+// 新增实现：极线约束双目加速匹配
+// ==========================================
+void StereoVO::matchStereoEpipolar(const vector<KeyPoint>& kps_l, const vector<KeyPoint>& kps_r,
+                                   const Mat& desc_l, const Mat& desc_r,
+                                   vector<DMatch>& good_matches, float max_v_disp) {
+    good_matches.clear();
+    const int TH_LOW = 50; // 汉明距离阈值
+
+    for (size_t i = 0; i < kps_l.size(); i++) {
+        const KeyPoint& kp_l = kps_l[i];
+        int best_dist = 256;
+        int best_idx = -1;
+
+        for (size_t j = 0; j < kps_r.size(); j++) {
+            const KeyPoint& kp_r = kps_r[j];
+            
+            // 1. 极线约束：水平对齐的双目相机，其特征点 y 坐标差异极小
+            if (abs(kp_l.pt.y - kp_r.pt.y) > max_v_disp) continue;
+            
+            // 2. 视差约束：左图特征点的 x 一定大于右图对应的 x
+            float disp = kp_l.pt.x - kp_r.pt.x;
+            if (disp <= 0.0f) continue;
+
+            // 3. 描述子计算 (仅对满足几何约束的点)
+            int dist = cv::norm(desc_l.row(i), desc_r.row(j), cv::NORM_HAMMING);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_idx = j;
+            }
+        }
+        
+        if (best_idx >= 0 && best_dist < TH_LOW) {
+            good_matches.push_back(DMatch(i, best_idx, best_dist));
+        }
+    }
+}
+
+// ==========================================
+// 新增实现：恒速模型 + 投影加速帧间匹配
+// ==========================================
+void StereoVO::matchTemporalByProjection(const vector<KeyPoint>& kps_prev, 
+                                         const vector<Point3f>& pts_3d_prev,
+                                         const Mat& desc_prev, 
+                                         const vector<KeyPoint>& kps_curr, 
+                                         const Mat& desc_curr,
+                                         const Sophus::SE3d& T_curr_prev,
+                                         const Mat& K,
+                                         vector<DMatch>& temporal_matches,
+                                         float search_radius) {
+    temporal_matches.clear();
+    double fx_ = K.at<double>(0, 0);
+    double fy_ = K.at<double>(1, 1);
+    double cx_ = K.at<double>(0, 2);
+    double cy_ = K.at<double>(1, 2);
+    const int TH_LOW = 50;
+
+    for (size_t i = 0; i < pts_3d_prev.size(); i++) {
+        const Point3f& pt3d = pts_3d_prev[i];
+        if (pt3d.z <= 0) continue; // 如果 Z <= 0 说明该点在上一帧没有成功生成 3D 坐标
+
+        // 将上一帧的 3D 点乘上预测的运动模型 (上一帧系 -> 当前帧系)
+        Eigen::Vector3d p_prev(pt3d.x, pt3d.y, pt3d.z);
+        Eigen::Vector3d p_curr = T_curr_prev * p_prev;
+
+        if (p_curr.z() <= 0.1) continue; // 运动后点跑到相机背后了，跳过
+
+        // 透视投影到像素平面
+        double u_pred = fx_ * p_curr.x() / p_curr.z() + cx_;
+        double v_pred = fy_ * p_curr.y() / p_curr.z() + cy_;
+
+        int best_dist = 256;
+        int best_idx = -1;
+
+        // 仅在投影点周围 search_radius 半径内寻找匹配特征点
+        for (size_t j = 0; j < kps_curr.size(); j++) {
+            const KeyPoint& kp_curr = kps_curr[j];
+            double du = kp_curr.pt.x - u_pred;
+            double dv = kp_curr.pt.y - v_pred;
+            
+            // 距离过滤器
+            if (du * du + dv * dv > search_radius * search_radius) continue;
+
+            int dist = cv::norm(desc_prev.row(i), desc_curr.row(j), cv::NORM_HAMMING);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_idx = j;
+            }
+        }
+
+        if (best_idx >= 0 && best_dist < TH_LOW) {
+            temporal_matches.push_back(DMatch(i, best_idx, best_dist));
+        }
+    }
+}
