@@ -9,7 +9,7 @@
 #include <Eigen/Core>
 #include "keyframe_selector.h"
 #include "stereo_vo.h"   // 提供 MapPoint 完整定义
-
+#include <shared_mutex>
 /**
  * @brief 滑动窗口管理器，对窗口内关键帧进行局部BA优化
  * 
@@ -25,7 +25,7 @@ public:
      * @param local_map        全局地图点引用（用于读写地图点坐标）
      */
     SlidingWindow(int window_size, const cv::Mat& K, double baseline,
-                  std::vector<MapPoint>& local_map);
+                  std::vector<MapPoint>& local_map, std::shared_mutex& map_mutex);
     
     /**
      * @brief 添加新关键帧到窗口
@@ -54,6 +54,7 @@ private:
     double baseline_;
     std::vector<MapPoint>& local_map_;   // 全局地图点池的引用
     std::deque<Keyframe> keyframes_;     // 窗口内关键帧队列（按时间顺序）
+    std::shared_mutex& map_mutex_;
     
     /**
      * @brief 将OpenCV旋转向量+平移转换为Sophus SE3

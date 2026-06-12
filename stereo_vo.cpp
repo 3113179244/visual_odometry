@@ -239,7 +239,7 @@ void StereoVO::updateLocalMap(const vector<Point3f>& pts_3d_cam, const Mat& img_
 
     // 世界位姿的逆，即当前相机系转到世界系的矩阵
     Sophus::SE3d T_camera_to_world = T_world_curr.inverse();
-
+    std::unique_lock<std::shared_mutex> lock(map_mutex);                               
     for (size_t i = 0; i < pts_3d_cam.size() && i < (size_t)desc_curr.rows; ++i) {
         Eigen::Vector3d P_c(pts_3d_cam[i].x, pts_3d_cam[i].y, pts_3d_cam[i].z);
         Eigen::Vector3d P_w = T_camera_to_world * P_c; 

@@ -93,9 +93,9 @@ private:
 // SlidingWindow 实现
 // ------------------------------------------------------------
 SlidingWindow::SlidingWindow(int window_size, const cv::Mat& K, double baseline,
-                             std::vector<MapPoint>& local_map)
+                             std::vector<MapPoint>& local_map, std::shared_mutex& map_mutex)
     : window_size_(window_size), K_(K.clone()), baseline_(baseline),
-      local_map_(local_map) {}
+      local_map_(local_map), map_mutex_(map_mutex) {}
 
 Sophus::SE3d SlidingWindow::cvToSophus(const cv::Mat& rvec, const cv::Mat& tvec) const {
     cv::Mat R;
@@ -119,7 +119,7 @@ void SlidingWindow::buildBAProblem(
     std::vector<std::tuple<int, int, cv::Point2f>>& observations,
     std::vector<Sophus::SE3d>& frame_poses,
     std::vector<Eigen::Vector3d>& points) const {
-    
+    std::shared_lock<std::shared_mutex> lock(map_mutex_);
     // 统计每个地图点被哪些关键帧观测
     std::map<int, std::set<int>> point_to_frames;  // map_point_idx -> set<frame_idx_in_window>
     
@@ -182,6 +182,7 @@ void SlidingWindow::updateOptimizedResults(const std::vector<Sophus::SE3d>& opt_
         sophusToCv(opt_poses[i], keyframes_[i].rvec, keyframes_[i].tvec);
     }
     // 更新地图点坐标
+    std::unique_lock<std::shared_mutex> lock(map_mutex_);
     for (size_t i = 0; i < point_ids_in_window.size(); ++i) {
         int raw_idx = point_ids_in_window[i];
         if (raw_idx >= 0 && raw_idx < (int)local_map_.size()) {

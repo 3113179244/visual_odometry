@@ -41,6 +41,7 @@ vector<Point2f> points2f_from_kps(const vector<KeyPoint>& kps) {
 }
 
 vector<Point3f> getLocalMapWorldPoints(const StereoVO& vo) {
+    std::shared_lock<std::shared_mutex> lock(vo.map_mutex);
     vector<Point3f> pts;
     pts.reserve(vo.local_map.size());
     for (auto& mp : vo.local_map) {
@@ -93,7 +94,7 @@ void TrackingThread()
     // ==========================================
     // 【修改 1】：初始化并启动独立的后端优化线程
     // ==========================================
-    SlidingWindow slide_win(10, vo.K, vo.baseline, vo.local_map);
+    SlidingWindow slide_win(10, vo.K, vo.baseline, vo.local_map,vo.map_mutex);
     LocalMapping local_mapper(&slide_win);
     local_mapper.Start(); // 启动后台大循环！
 

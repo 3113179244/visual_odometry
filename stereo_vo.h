@@ -9,7 +9,7 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
 #include <sophus/se3.hpp>
-
+#include <shared_mutex>
 struct MapPoint {
     cv::Point3f pos_world; 
     cv::Mat descriptor;    
@@ -33,7 +33,8 @@ public:
     
     std::vector<MapPoint> local_map; 
     const size_t max_local_points = 1500; 
-
+    mutable std::shared_mutex map_mutex;
+    
     StereoVO() = default;
 
     bool loadCalibration(const std::string& calib_file_path);
