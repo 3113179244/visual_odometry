@@ -24,6 +24,7 @@
 #include "slide_window.h"
 #include "stereo_vo.h"
 #include "keyframe_selector.h"
+#include "local_mapping.h"
 
 using namespace std;
 using namespace cv;
@@ -55,15 +56,15 @@ atomic<bool> system_running{true};
 void TrackingThread()
 {
     StereoVO vo;
-    if (!vo.loadCalibration("/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/calib.txt"))
+    if (!vo.loadCalibration("/home/wzj/KITTI/data_odometry_gray/dataset/sequences/04/calib.txt"))
     {
         cerr << "标定加载失败!" << endl;
         system_running = false;
         return;
     }
 
-    string path_left = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/image_0";
-    string path_right = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/07/image_1";
+    string path_left = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/04/image_0";
+    string path_right = "/home/wzj/KITTI/data_odometry_gray/dataset/sequences/04/image_1";
     vector<string> files_left, files_right;
     for (const auto &e : fs::directory_iterator(path_left))
         if (e.path().extension() == ".png")
@@ -79,7 +80,6 @@ void TrackingThread()
     Sophus::SE3d global_pose;
     traj_out << 0.0 << " " << 0.0 << " " << 0.0 << endl;
 
-    // 恒速运动模型：保存上一帧到当前帧的相对运动
     Sophus::SE3d last_delta_T; 
 
     int max_frames = files_left.size() - 1;
@@ -90,7 +90,12 @@ void TrackingThread()
     KeyframeSelector selector(vo.fx, vo.fy, vo.cx, vo.cy, vo.baseline, img_width, img_height);
     selector.setParameters(10.0, 0.15, 30, 15.0, 0.5, 6, 8, 0.35, 0.85);
 
+    // ==========================================
+    // 【修改 1】：初始化并启动独立的后端优化线程
+    // ==========================================
     SlidingWindow slide_win(10, vo.K, vo.baseline, vo.local_map);
+    LocalMapping local_mapper(&slide_win);
+    local_mapper.Start(); // 启动后台大循环！
 
     vector<Keyframe> window_keyframes;
     const int max_window_size = 15;
@@ -108,10 +113,8 @@ void TrackingThread()
     t_init_l.join();
     t_init_r.join();
     
-    // 【修改】使用极线加速双目匹配
     vo.matchStereoEpipolar(kps_prev_l, kps_prev_r, desc_prev_l, desc_prev_r, stereo_matches);
 
-    // 【新增】提前构建上一帧（此时为第0帧）对应的相机系 3D 点池
     vector<Point3f> pts_3d_prev(kps_prev_l.size(), Point3f(0, 0, 0));
     vector<Point3f> init_pts_3d_cam;
     for (const auto& sm : stereo_matches) {
@@ -123,7 +126,7 @@ void TrackingThread()
             double x = (kps_prev_l[idx_l].pt.x - vo.cx) * z / vo.fx;
             double y = (kps_prev_l[idx_l].pt.y - vo.cy) * z / vo.fy;
             pts_3d_prev[idx_l] = Point3f(x, y, z);
-            init_pts_3d_cam.push_back(pts_3d_prev[idx_l]); // 用于初次建立 Local Map
+            init_pts_3d_cam.push_back(pts_3d_prev[idx_l]); 
         }
     }
 
@@ -139,11 +142,16 @@ void TrackingThread()
     cv::Mat rvec_init = cv::Mat::zeros(3, 1, CV_64F);
     cv::Mat tvec_init = cv::Mat::zeros(3, 1, CV_64F);
     vector<Point2f> kps_prev_2d = points2f_from_kps(kps_prev_l);
-    Keyframe first_kf(0, rvec_init, tvec_init, kps_prev_2d, prev_mp_indices);
-    window_keyframes.push_back(first_kf);
+    
+    // ==========================================
+    // 【修改 2】：使用智能指针，并将第一帧丢进安全队列
+    // ==========================================
+    auto first_kf = std::make_shared<Keyframe>(0, rvec_init, tvec_init, kps_prev_2d, prev_mp_indices);
+    window_keyframes.push_back(*first_kf); // 前端保留一份做状态机记录
     last_keyframe_ptr = &window_keyframes.back();
-    slide_win.addKeyframe(first_kf);
-    cout << "第一帧已作为关键帧插入，local_map 大小: " << vo.local_map.size() << endl;
+    
+    local_mapper.InsertKeyFrame(first_kf); // 【核心】非阻塞，直接喂给后端队列
+    cout << "第一帧已送入后端队列，local_map 大小: " << vo.local_map.size() << endl;
 
     // 主循环
     for (int i = 1; i <= max_frames && system_running; ++i)
@@ -159,13 +167,11 @@ void TrackingThread()
         t_l.join();
         t_r.join();
 
-        // 【修改】使用时序投影匹配，代替原先的全局描述子匹配
         vector<DMatch> temporal_matches;
         vo.matchTemporalByProjection(kps_prev_l, pts_3d_prev, desc_prev_l, 
                                      kps_curr_l, desc_curr_l, 
                                      last_delta_T, vo.K, temporal_matches, 15.0f);
 
-        // 【修改】直接解析投影匹配的结果
         vector<Point3f> pts_3d_cam;
         vector<Point2f> pts_2d_curr;
         vector<DMatch> viz_matches;
@@ -173,12 +179,11 @@ void TrackingThread()
         for (const auto& tm : temporal_matches) {
             int idx_prev = tm.queryIdx;
             int idx_curr = tm.trainIdx;
-            pts_3d_cam.push_back(pts_3d_prev[idx_prev]);     // 取出上一帧的 3D 点
-            pts_2d_curr.push_back(kps_curr_l[idx_curr].pt);  // 对应当前的像素坐标
+            pts_3d_cam.push_back(pts_3d_prev[idx_prev]);     
+            pts_2d_curr.push_back(kps_curr_l[idx_curr].pt);  
             viz_matches.push_back(tm);
         }
 
-        // 维护 Local Map 索引关系
         vector<int> curr_mp_indices(kps_curr_l.size(), -1);
         for (const auto &match : temporal_matches) {
             int prev_idx = match.queryIdx;
@@ -206,7 +211,6 @@ void TrackingThread()
                     Eigen::Vector3d t_eigen(tvec_pnp.at<double>(0, 0), tvec_pnp.at<double>(1, 0), tvec_pnp.at<double>(2, 0));
                     Sophus::SE3d T_cw(R_eigen, t_eigen);
                     
-                    // 【新增】更新恒速运动模型：T_cw 恰好就是上一帧到当前帧的相对运动 (T_curr_prev)
                     last_delta_T = T_cw;
 
                     global_pose = global_pose * T_cw.inverse();
@@ -226,14 +230,12 @@ void TrackingThread()
                 rvec_curr = Mat::zeros(3, 1, CV_64F);
                 tvec_curr = Mat::zeros(3, 1, CV_64F);
             }
-            // 追踪失败时，不更新 last_delta_T，保持原有速度预测
         }
 
         traj_out << global_pose.translation().x() << " "
                  << global_pose.translation().y() << " "
                  << global_pose.translation().z() << endl;
 
-        // 关键帧决策
         vector<int> matched_indices;
         for (int idx : curr_mp_indices) if (idx != -1) matched_indices.push_back(idx);
         vector<Point2f> curr_kps_2d = points2f_from_kps(kps_curr_l);
@@ -246,12 +248,17 @@ void TrackingThread()
         }
 
         if (is_keyframe) {
-            Keyframe new_kf(i, rvec_curr, tvec_curr, curr_kps_2d, matched_indices);
-            window_keyframes.push_back(new_kf);
+            // ==========================================
+            // 【修改 3】：把关键帧打包为共享指针，推给队列
+            // ==========================================
+            auto new_kf = std::make_shared<Keyframe>(i, rvec_curr, tvec_curr, curr_kps_2d, matched_indices);
+            
+            window_keyframes.push_back(*new_kf);
             if (window_keyframes.size() > max_window_size) window_keyframes.erase(window_keyframes.begin());
             last_keyframe_ptr = &window_keyframes.back();
-            slide_win.addKeyframe(new_kf);
-            cout << "📸 关键帧插入: 帧 " << i << ", 窗口大小=" << window_keyframes.size() << endl;
+            
+            local_mapper.InsertKeyFrame(new_kf); // 【核心】交接任务，前端立刻脱身！
+            cout << "📸 关键帧已异步压入后端队列: 帧 " << i << endl;
         }
 
         // 可视化
@@ -263,12 +270,9 @@ void TrackingThread()
             shared_viz_img = img_viz.clone();
         }
 
-        // ==========================================
-        // 【新增】为下一帧做准备：计算当前帧的双目极线匹配，提取 3D 点
-        // ==========================================
         vo.matchStereoEpipolar(kps_curr_l, kps_curr_r, desc_curr_l, desc_curr_r, stereo_matches);
         
-        pts_3d_prev.assign(kps_curr_l.size(), Point3f(0, 0, 0)); // 初始化全 0
+        pts_3d_prev.assign(kps_curr_l.size(), Point3f(0, 0, 0)); 
         for (const auto& sm : stereo_matches) {
             int idx_l = sm.queryIdx;
             int idx_r = sm.trainIdx;
@@ -281,7 +285,6 @@ void TrackingThread()
             }
         }
 
-        // 状态滚动
         img_prev_l = img_curr_l.clone();
         kps_prev_l = kps_curr_l;
         kps_prev_r = kps_curr_r;
@@ -291,6 +294,11 @@ void TrackingThread()
 
         this_thread::sleep_for(chrono::milliseconds(10));
     }
+
+    // ==========================================
+    // 【修改 4】：安全结束，等待后台收尾工作
+    // ==========================================
+    local_mapper.Stop(); // 通知队列打烊，等待最后的优化完成
 
     traj_out.close();
     cout << "== 追踪线程结束 ==" << endl;
