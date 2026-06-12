@@ -129,6 +129,9 @@ void SlidingWindow::buildBAProblem(
         for (size_t j = 0; j < kf.map_point_indices.size(); ++j) {
             int mp_idx = kf.map_point_indices[j];
             if (mp_idx >= 0 && mp_idx < (int)local_map_.size()) {
+                // 新增：遇到坏点直接跳过不加入优化
+                if (local_map_[mp_idx].is_bad) continue; 
+                
                 cv::Point2f pt = kf.keypoints_2d[j];
                 observations.emplace_back(i, mp_idx, pt);
                 point_to_frames[mp_idx].insert(i);

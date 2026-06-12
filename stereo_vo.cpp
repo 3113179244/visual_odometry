@@ -196,37 +196,55 @@ void StereoVO::trackLocalMap(const Mat& img_curr, const Sophus::SE3d& T_world_pr
     if (local_map.empty()) return;
 
     Mat desc_curr;
-    // 替换：使用四叉树均匀化提取特征
-    extractORBWithQuadTree(img_curr, kps_curr, desc_curr, 2000);
-    if (desc_curr.empty()) return;
+    extractORBWithQuadTree(img_curr, kps_curr, desc_curr, 2000); //
+    if (desc_curr.empty()) return; //
 
-    // 拼接 Local Map 的总描述子矩阵
+    // ========================================================
+    // 核心重构：过滤坏点，并记录“压缩描述子”与“原始地图”的索引映射
+    // ========================================================
     Mat desc_local;
-    for (const auto& mp : local_map) {
-        desc_local.push_back(mp.descriptor);
+    vector<int> valid_local_indices; // 记录 desc_local 的每一行对应真实 local_map 的哪个绝对下标
+    
+    {
+        std::shared_lock<std::shared_mutex> lock(map_mutex); // 读锁保护
+        for (size_t i = 0; i < local_map.size(); ++i) {
+            if (local_map[i].is_bad) continue; // 🌟 过滤坏点！
+            
+            desc_local.push_back(local_map[i].descriptor);
+            valid_local_indices.push_back(i);
+        }
     }
 
-    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
-    vector<DMatch> matches;
-    matcher->match(desc_local, desc_curr, matches);
-    if (matches.empty()) return;
+    if (desc_local.empty()) return; // 如果全部被剔除光了，直接退出
 
-    double min_dist = 10000;
-    for (size_t i = 0; i < matches.size(); i++) if (matches[i].distance < min_dist) min_dist = matches[i].distance;
+    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming"); //
+    vector<DMatch> matches;
+    matcher->match(desc_local, desc_curr, matches); //
+    if (matches.empty()) return; //
+
+    double min_dist = 10000; //
+    for (size_t i = 0; i < matches.size(); i++) if (matches[i].distance < min_dist) min_dist = matches[i].distance; //
 
     for (const auto& m : matches) {
-        if (m.distance <= max(2 * min_dist, 30.0)) {
-            int local_map_idx = m.queryIdx;
-            int curr_kp_idx = m.trainIdx;
+        if (m.distance <= max(2 * min_dist, 30.0)) { //
+            int compressed_idx = m.queryIdx; // 匹配器返回的是 desc_local 的行号
+            int curr_kp_idx = m.trainIdx;    //
 
-            Point3f p_w = local_map[local_map_idx].pos_world;
-            Eigen::Vector3d P_w(p_w.x, p_w.y, p_w.z);
+            // 🌟 映射回全局真实的地图点索引
+            int local_map_idx = valid_local_indices[compressed_idx];
+
+            Point3f p_w;
+            {
+                std::shared_lock<std::shared_mutex> lock(map_mutex);
+                p_w = local_map[local_map_idx].pos_world;
+            }
             
-            Eigen::Vector3d P_c = T_world_predict * P_w;
+            Eigen::Vector3d P_w(p_w.x, p_w.y, p_w.z); //
+            Eigen::Vector3d P_c = T_world_predict * P_w; //
 
-            pts_3d.push_back(Point3f(P_c.x(), P_c.y(), P_c.z()));
-            pts_2d.push_back(kps_curr[curr_kp_idx].pt);
-            viz_matches.push_back(m);
+            pts_3d.push_back(Point3f(P_c.x(), P_c.y(), P_c.z())); //
+            pts_2d.push_back(kps_curr[curr_kp_idx].pt); //
+            viz_matches.push_back(m); //
         }
     }
 }

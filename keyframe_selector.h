@@ -18,11 +18,22 @@ struct Keyframe {
     std::vector<cv::Point2f> keypoints_2d;  // 该帧提取的2D特征点（像素坐标）
     std::vector<int> map_point_indices;     // 对应的地图点索引（在全局local_map中的位置）
     
-    Keyframe() : id(-1) {}
+    // ==========================================
+    // 新增：异步三角化所必须的原始图像与特征数据
+    // ==========================================
+    cv::Mat img_l;                          
+    std::vector<cv::KeyPoint> kps_l, kps_r; 
+    cv::Mat desc_l, desc_r;                 
+
+    Keyframe() : id(-1) {} //
     Keyframe(int _id, const cv::Mat& _rvec, const cv::Mat& _tvec,
-             const std::vector<cv::Point2f>& _kps, const std::vector<int>& _mp_ids)
+             const std::vector<cv::Point2f>& _kps, const std::vector<int>& _mp_ids,
+             const cv::Mat& _img_l, const std::vector<cv::KeyPoint>& _kps_l, 
+             const std::vector<cv::KeyPoint>& _kps_r, const cv::Mat& _desc_l, const cv::Mat& _desc_r)
         : id(_id), rvec(_rvec.clone()), tvec(_tvec.clone()),
-          keypoints_2d(_kps), map_point_indices(_mp_ids) {}
+          keypoints_2d(_kps), map_point_indices(_mp_ids),
+          img_l(_img_l.clone()), kps_l(_kps_l), kps_r(_kps_r), 
+          desc_l(_desc_l.clone()), desc_r(_desc_r.clone()) {}
 };
 
 /**

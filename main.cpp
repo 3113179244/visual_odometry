@@ -45,6 +45,7 @@ vector<Point3f> getLocalMapWorldPoints(const StereoVO& vo) {
     vector<Point3f> pts;
     pts.reserve(vo.local_map.size());
     for (auto& mp : vo.local_map) {
+        if (mp.is_bad) continue;
         pts.push_back(mp.pos_world);
     }
     return pts;
@@ -75,7 +76,8 @@ void TrackingThread()
             files_right.push_back(e.path().string());
     sort(files_left.begin(), files_left.end());
     sort(files_right.begin(), files_right.end());
-
+    std::vector<Sophus::SE3d> vGlobalPoses; 
+    vGlobalPoses.reserve(3000);
     ofstream traj_out("/home/wzj/stereovo/trajectory.txt");
     traj_out << "# x y z (Global Trajectory)" << endl;
     Sophus::SE3d global_pose;
@@ -95,7 +97,7 @@ void TrackingThread()
     // 【修改 1】：初始化并启动独立的后端优化线程
     // ==========================================
     SlidingWindow slide_win(10, vo.K, vo.baseline, vo.local_map,vo.map_mutex);
-    LocalMapping local_mapper(&slide_win);
+    LocalMapping local_mapper(&slide_win, vo.local_map, vo.map_mutex, &vo); // 🌟 传入 &vo 指针
     local_mapper.Start(); // 启动后台大循环！
 
     vector<Keyframe> window_keyframes;
@@ -132,14 +134,7 @@ void TrackingThread()
     }
 
     Sophus::SE3d identity_pose;
-    vo.updateLocalMap(init_pts_3d_cam, img_prev_l, kps_prev_l, identity_pose);
-
     vector<int> prev_mp_indices(kps_prev_l.size(), -1);
-    size_t base_idx = vo.local_map.size() - init_pts_3d_cam.size();
-    for (size_t i = 0; i < init_pts_3d_cam.size(); ++i) {
-        prev_mp_indices[i] = base_idx + i;
-    }
-
     cv::Mat rvec_init = cv::Mat::zeros(3, 1, CV_64F);
     cv::Mat tvec_init = cv::Mat::zeros(3, 1, CV_64F);
     vector<Point2f> kps_prev_2d = points2f_from_kps(kps_prev_l);
@@ -147,11 +142,13 @@ void TrackingThread()
     // ==========================================
     // 【修改 2】：使用智能指针，并将第一帧丢进安全队列
     // ==========================================
-    auto first_kf = std::make_shared<Keyframe>(0, rvec_init, tvec_init, kps_prev_2d, prev_mp_indices);
-    window_keyframes.push_back(*first_kf); // 前端保留一份做状态机记录
-    last_keyframe_ptr = &window_keyframes.back();
-    
-    local_mapper.InsertKeyFrame(first_kf); // 【核心】非阻塞，直接喂给后端队列
+    auto first_kf = std::make_shared<Keyframe>(
+        0, rvec_init, tvec_init, kps_prev_2d, prev_mp_indices,
+        img_prev_l, kps_prev_l, kps_prev_r, desc_prev_l, desc_prev_r
+    );
+    window_keyframes.push_back(*first_kf); //
+    last_keyframe_ptr = &window_keyframes.back(); //
+    local_mapper.InsertKeyFrame(first_kf); //
     cout << "第一帧已送入后端队列，local_map 大小: " << vo.local_map.size() << endl;
 
     // 主循环
@@ -249,17 +246,17 @@ void TrackingThread()
         }
 
         if (is_keyframe) {
-            // ==========================================
-            // 【修改 3】：把关键帧打包为共享指针，推给队列
-            // ==========================================
-            auto new_kf = std::make_shared<Keyframe>(i, rvec_curr, tvec_curr, curr_kps_2d, matched_indices);
+            auto new_kf = std::make_shared<Keyframe>(
+                i, rvec_curr, tvec_curr, curr_kps_2d, matched_indices,
+                img_curr_l, kps_curr_l, kps_curr_r, desc_curr_l, desc_curr_r
+            );
             
-            window_keyframes.push_back(*new_kf);
-            if (window_keyframes.size() > max_window_size) window_keyframes.erase(window_keyframes.begin());
-            last_keyframe_ptr = &window_keyframes.back();
+            window_keyframes.push_back(*new_kf); //
+            if (window_keyframes.size() > max_window_size) window_keyframes.erase(window_keyframes.begin()); //
+            last_keyframe_ptr = &window_keyframes.back(); //
             
-            local_mapper.InsertKeyFrame(new_kf); // 【核心】交接任务，前端立刻脱身！
-            cout << "📸 关键帧已异步压入后端队列: 帧 " << i << endl;
+            local_mapper.InsertKeyFrame(new_kf); // 任务完全交接给后台
+            cout << "📸 [前端主线程] 关键帧打包完毕并异步推入后端队列: 帧 " << i << " (前端耗时0ms，不卡顿)" << endl;
         }
 
         // 可视化

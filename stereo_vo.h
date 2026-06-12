@@ -13,6 +13,10 @@
 struct MapPoint {
     cv::Point3f pos_world; 
     cv::Mat descriptor;    
+    int n_observed = 1;     // 被成功匹配并用于位姿求解的次数
+    int n_visible = 1;      // 理论上应该在视野内被观测到的次数
+    bool is_bad = false;    // 坏点标记，true 表示等待被剔除
+    int first_kf_id = -1;   // 首次创建该点的关键帧 ID
 };
 
 class ExtractorNode {
@@ -34,7 +38,7 @@ public:
     std::vector<MapPoint> local_map; 
     const size_t max_local_points = 1500; 
     mutable std::shared_mutex map_mutex;
-    
+
     StereoVO() = default;
 
     bool loadCalibration(const std::string& calib_file_path);
