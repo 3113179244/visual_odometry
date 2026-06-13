@@ -42,10 +42,14 @@ void LocalMapping::Run() {
 
             std::vector<cv::Point3f> init_pts_3d_cam;
             std::vector<cv::Mat> descriptors_new; 
-            std::vector<int> stereo_l_indices; // 🌟 抓紧原始索引
+            std::vector<int> stereo_l_indices; 
 
             for (const auto& sm : stereo_matches) {
                 int idx_l = sm.queryIdx; int idx_r = sm.trainIdx;
+                
+                // 如果当前关键帧的这个特征点在前端已经被追踪并分配了合法的地图点全局ID，后端直接跳过，防止重复创建
+                if (currKF->map_point_indices[idx_l] != -1) continue;
+
                 double disparity = currKF->kps_l[idx_l].pt.x - currKF->kps_r[idx_r].pt.x;
                 if (disparity > 0) {
                     double z = (mpVO->fx * mpVO->baseline) / disparity;
@@ -57,7 +61,7 @@ void LocalMapping::Run() {
 
                     init_pts_3d_cam.push_back(cv::Point3f(x, y, z));
                     descriptors_new.push_back(currKF->desc_l.row(idx_l).clone());
-                    stereo_l_indices.push_back(idx_l); // 🌟 记录它的左图槽位
+                    stereo_l_indices.push_back(idx_l); 
                 }
             }
 
@@ -68,7 +72,7 @@ void LocalMapping::Run() {
             Sophus::SE3d T_wc = T_cw.inverse(); 
 
             size_t start_global_idx = mpMap->GetGlobalMapPointsSize();
-            int valid_added_count = 0; // 🌟 追踪写入量
+            int valid_added_count = 0; 
 
             for (size_t i = 0; i < init_pts_3d_cam.size(); ++i) {
                 Eigen::Vector3d P_c(init_pts_3d_cam[i].x, init_pts_3d_cam[i].y, init_pts_3d_cam[i].z);
@@ -86,7 +90,6 @@ void LocalMapping::Run() {
 
                 mpMap->AddMapPoint(pMP);
                 
-                // 🌟 再见 push_back！直接落位到对应的数组槽中
                 currKF->map_point_indices[stereo_l_indices[i]] = start_global_idx + valid_added_count;
                 valid_added_count++;
             }
@@ -96,7 +99,10 @@ void LocalMapping::Run() {
             mpSlideWindow->addKeyframe(*currKF);
             CullLocalMap();
             
-            if (currKF->id % 5 == 0) { mpMap->CleanBadMechanisms(); }
+            // 【核心修改点】：将此处的物理清理代码注释掉！
+            // 防止大地图平移引起的关键帧整型坐标下标错位与索引坍塌。
+            // if (currKF->id % 5 == 0) { mpMap->CleanBadMechanisms(); }
+            
             std::cout << "[LocalMapping] 后端关键帧 ID: " << currKF->id << " 局部融合与优化全部完成。\n" << std::endl;
         }
     }

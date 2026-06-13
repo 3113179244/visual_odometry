@@ -195,14 +195,14 @@ void StereoVO::matchStereoEpipolar(const vector<KeyPoint>& kps_l, const vector<K
     }
 }
 
-void StereoVO::matchTemporalByProjection(const vector<KeyPoint>& kps_prev, 
-                                         const vector<Point3f>& pts_3d_prev,
-                                         const Mat& desc_prev, 
-                                         const vector<KeyPoint>& kps_curr, 
-                                         const Mat& desc_curr,
+void StereoVO::matchTemporalByProjection(const std::vector<cv::KeyPoint>& kps_prev, 
+                                         const std::vector<cv::Point3f>& pts_3d_prev,
+                                         const cv::Mat& desc_prev, 
+                                         const std::vector<cv::KeyPoint>& kps_curr, 
+                                         const cv::Mat& desc_curr,
                                          const Sophus::SE3d& T_curr_prev,
-                                         const Mat& K,
-                                         vector<DMatch>& temporal_matches,
+                                         const cv::Mat& K,
+                                         std::vector<cv::DMatch>& temporal_matches,
                                          float search_radius) {
     temporal_matches.clear();
     double fx_ = K.at<double>(0, 0); double fy_ = K.at<double>(1, 1);
@@ -210,6 +210,9 @@ void StereoVO::matchTemporalByProjection(const vector<KeyPoint>& kps_prev,
     const int TH_LOW = 50;
 
     for (size_t i = 0; i < pts_3d_prev.size(); i++) {
+        // 【核心修改点】：加入行边界防御，防止 OpenCV compute 阶段剔除边界特征导致 rows 不对齐越界崩溃
+        if (i >= (size_t)desc_prev.rows) continue;
+
         const Point3f& pt3d = pts_3d_prev[i];
         if (pt3d.z <= 0) continue;
 

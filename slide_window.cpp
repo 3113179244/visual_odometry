@@ -19,11 +19,9 @@ template<>
 inline double GetRawValue<double>(const double& val) { return val; }
 
 struct ReprojectionErrorAutoDiff {
-    ReprojectionErrorAutoDiff(const cv::Point2f& obs, const cv::Mat& K, const Sophus::SE3d& Tcw_init)
-        : obs_(obs.x, obs.y), Tcw_init_(Tcw_init) {
-        fx_ = K.at<double>(0,0); fy_ = K.at<double>(1,1);
-        cx_ = K.at<double>(0,2); cy_ = K.at<double>(1,2);
-    }
+    // 🌟 修改：直接传入显式双精度参数
+    ReprojectionErrorAutoDiff(const cv::Point2f& obs, double fx, double fy, double cx, double cy)
+        : obs_(obs.x, obs.y), fx_(fx), fy_(fy), cx_(cx), cy_(cy) {}
 
     template <typename T>
     bool operator()(const T* const jet_delta_xi, const T* const jet_Pw, T* residuals) const {
@@ -32,8 +30,7 @@ struct ReprojectionErrorAutoDiff {
                      jet_delta_xi[3], jet_delta_xi[4], jet_delta_xi[5];
         
         Sophus::SE3<T> delta_T = Sophus::SE3<T>::exp(delta_vec);
-        Sophus::SE3<T> Tcw_init_T = Tcw_init_.cast<T>();
-        Sophus::SE3<T> Tcw_optimized = delta_T * Tcw_init_T;
+        Sophus::SE3<T> Tcw_optimized = delta_T * Tcw_init_T_;
         
         Eigen::Map<const Eigen::Matrix<T, 3, 1>> Pw(jet_Pw);
         Eigen::Matrix<T, 3, 1> Pc = Tcw_optimized * Pw;
@@ -54,13 +51,14 @@ struct ReprojectionErrorAutoDiff {
     }
 
     Eigen::Vector2d obs_;
-    Sophus::SE3d Tcw_init_; 
+    Sophus::SE3d Tcw_init_T_; // 内部自对齐使用的初值
     double fx_, fy_, cx_, cy_;
 };
 
-SlidingWindow::SlidingWindow(int window_size, const cv::Mat& K, double baseline,
+// 🌟 显式双精度构造初始化
+SlidingWindow::SlidingWindow(int window_size, double fx, double fy, double cx, double cy, double baseline,
                              int img_width, int img_height, std::shared_ptr<Map> pMap)
-    : window_size_(window_size), K_(K.clone()), baseline_(baseline),
+    : window_size_(window_size), fx_(fx), fy_(fy), cx_(cx), cy_(cy), baseline_(baseline),
       img_width_(img_width), img_height_(img_height), mpMap(pMap) {}
 
 Sophus::SE3d SlidingWindow::cvToSophus(const cv::Mat& rvec, const cv::Mat& tvec) const {
@@ -132,7 +130,6 @@ void SlidingWindow::buildBAProblem(std::vector<std::tuple<int, int, cv::Point2f>
 void SlidingWindow::updateOptimizedResults(const std::vector<Sophus::SE3d>& opt_poses,
                                            const std::vector<Eigen::Vector3d>& opt_points,
                                            const std::vector<int>& point_ids_in_window) {
-    // 1. 更新滑窗内部副本
     for (size_t i = 0; i < opt_poses.size() && i < keyframes_.size(); ++i) {
         sophusToCv(opt_poses[i], keyframes_[i].rvec, keyframes_[i].tvec);
     }
@@ -162,13 +159,8 @@ void SlidingWindow::updateOptimizedResults(const std::vector<Sophus::SE3d>& opt_
 }
 
 void SlidingWindow::optimize() {
-    // =========================================================================
-    // 🌟 纯前端调试模式开启：在此处强制返回，阻断所有后端 Ceres 计算
-    // 滑窗队列和数据结构将继续正常构建和维护，但不会对位姿施加任何干涉和破坏
-    // =========================================================================
-    return;
-
     if (keyframes_.size() < 2) return;
+    
     std::vector<std::tuple<int, int, cv::Point2f>> raw_obs;
     std::vector<Sophus::SE3d> frame_poses_init;
     std::vector<Eigen::Vector3d> points_init;
@@ -198,19 +190,19 @@ void SlidingWindow::optimize() {
     points_init = ordered_points;
     
     ceres::Problem problem;
-    std::vector<double*> pose_params;
-    for (size_t i = 0; i < keyframes_.size(); ++i) {
-        double* xi = new double[6]{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        pose_params.push_back(xi);
-        problem.AddParameterBlock(xi, 6);
-    }
-    if (!pose_params.empty()) problem.SetParameterBlockConstant(pose_params[0]);
     
-    std::vector<double*> point_params;
+    std::vector<std::vector<double>> pose_vecs(keyframes_.size(), std::vector<double>(6, 0.0));
+    for (size_t i = 0; i < keyframes_.size(); ++i) {
+        problem.AddParameterBlock(pose_vecs[i].data(), 6);
+    }
+    if (!pose_vecs.empty()) problem.SetParameterBlockConstant(pose_vecs[0].data());
+    
+    std::vector<std::vector<double>> point_vecs(points_init.size(), std::vector<double>(3, 0.0));
     for (size_t i = 0; i < points_init.size(); ++i) {
-        double* pt = new double[3]{points_init[i].x(), points_init[i].y(), points_init[i].z()};
-        point_params.push_back(pt);
-        problem.AddParameterBlock(pt, 3);
+        point_vecs[i][0] = points_init[i].x();
+        point_vecs[i][1] = points_init[i].y();
+        point_vecs[i][2] = points_init[i].z();
+        problem.AddParameterBlock(point_vecs[i].data(), 3);
     }
     
     for (const auto& obs : raw_obs) {
@@ -219,34 +211,39 @@ void SlidingWindow::optimize() {
         cv::Point2f uv = std::get<2>(obs);
         int ba_pt_idx = raw_to_ba[raw_mp_idx];
         
-        ceres::CostFunction* cost = new ceres::AutoDiffCostFunction<ReprojectionErrorAutoDiff, 2, 6, 3>(
-            new ReprojectionErrorAutoDiff(uv, K_, frame_poses_init[frame_idx])
-        );
-        problem.AddResidualBlock(cost, new ceres::HuberLoss(1.0), pose_params[frame_idx], point_params[ba_pt_idx]);
+        // 🌟 修改：传入显式的内参数值
+        ReprojectionErrorAutoDiff* cost_struct = new ReprojectionErrorAutoDiff(uv, fx_, fy_, cx_, cy_);
+        cost_struct->Tcw_init_T_ = frame_poses_init[frame_idx];
+        
+        ceres::CostFunction* cost = new ceres::AutoDiffCostFunction<ReprojectionErrorAutoDiff, 2, 6, 3>(cost_struct);
+        problem.AddResidualBlock(cost, new ceres::HuberLoss(1.0), pose_vecs[frame_idx].data(), point_vecs[ba_pt_idx].data());
     }
     
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::DENSE_SCHUR;
-    options.max_num_iterations = 20;
+    options.linear_solver_type = ceres::SPARSE_SCHUR; 
+    options.max_num_iterations = 12; 
     options.num_threads = 4;
+    options.use_nonmonotonic_steps = true;
+    options.use_inner_iterations = true;
+    options.function_tolerance = 1e-3;
+    options.gradient_tolerance = 1e-3;
+    
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     
     std::vector<Sophus::SE3d> opt_poses(keyframes_.size());
     for (size_t i = 0; i < keyframes_.size(); ++i) {
-        Eigen::Map<const Eigen::Matrix<double,6,1>> xi(pose_params[i]);
+        Eigen::Map<const Eigen::Matrix<double,6,1>> xi(pose_vecs[i].data());
         Eigen::Matrix<double, 6, 1> delta_vec;
         delta_vec << xi(0), xi(1), xi(2), xi(3), xi(4), xi(5);
         opt_poses[i] = Sophus::SE3d::exp(delta_vec) * frame_poses_init[i];
     }
     std::vector<Eigen::Vector3d> opt_points(points_init.size());
     for (size_t i = 0; i < points_init.size(); ++i) {
-        opt_points[i] = Eigen::Vector3d(point_params[i][0], point_params[i][1], point_params[i][2]);
+        opt_points[i] = Eigen::Vector3d(point_vecs[i][0], point_vecs[i][1], point_vecs[i][2]);
     }
     
     updateOptimizedResults(opt_poses, opt_points, ba_to_raw);
-    for (double* p : pose_params) delete[] p;
-    for (double* p : point_params) delete[] p;
 }
 
 void SlidingWindow::addKeyframe(const Keyframe& kf) {
