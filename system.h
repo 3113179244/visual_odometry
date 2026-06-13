@@ -10,13 +10,14 @@
 #include "slide_window.h"
 #include "tracking.h"
 
-class System {
+class System
+{
 public:
-    System(const std::string& calib_file);
+    System(const std::string &calib_file);
     ~System();
 
     // 启动系统
-    void Run(const std::string& path_left, const std::string& path_right, const std::string& traj_out_path);
+    void Run(const std::string &path_left, const std::string &path_right, const std::string &traj_out_path);
     void Stop();
 
 private:
@@ -26,7 +27,7 @@ private:
     std::unique_ptr<SlidingWindow> mpSlideWindow;
     std::unique_ptr<LocalMapping> mpLocalMapper;
     std::unique_ptr<KeyframeSelector> mpSelector;
-    
+
     // ==== 前端追踪器 ====
     std::unique_ptr<Tracking> mpTracker;
 

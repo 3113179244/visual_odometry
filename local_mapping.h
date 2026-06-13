@@ -8,9 +8,10 @@
 
 class StereoVO;
 
-class LocalMapping {
+class LocalMapping
+{
 public:
-    LocalMapping(SlidingWindow* slide_win, std::shared_ptr<Map> pMap, StereoVO* vo);
+    LocalMapping(SlidingWindow *slide_win, std::shared_ptr<Map> pMap, StereoVO *vo);
     ~LocalMapping();
 
     void Start();
@@ -22,11 +23,11 @@ private:
     void FuseMapPoints(KeyframePtr pKF);
     void CullLocalMap();
 
-    SlidingWindow* mpSlideWindow;
+    SlidingWindow *mpSlideWindow;
     SafeQueue<KeyframePtr> mKeyFrameQueue; // 阻塞线程安全队列
-    std::thread* mptLocalMapping;
+    std::thread *mptLocalMapping;
     bool mbRunning;
 
-    StereoVO* mpVO;
+    StereoVO *mpVO;
     std::shared_ptr<Map> mpMap;
 };

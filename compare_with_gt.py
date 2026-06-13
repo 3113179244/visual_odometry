@@ -118,4 +118,4 @@ if __name__ == '__main__':
     evaluator = KittiEvaluator(gt_dir=GT_DIRECTORY, vo_path='trajectory.txt')
     
     # 🌟 测试哪个序列，直接在这里修改数字即可（支持 4 或 7）
-    evaluator.evaluate(4)
+    evaluator.evaluate(7)

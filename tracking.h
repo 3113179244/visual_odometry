@@ -10,18 +10,20 @@
 #include "keyframe_selector.h"
 
 // 定义轻量级结构体，用于记录每一帧的从属优化关系
-struct FrameRecord {
+struct FrameRecord
+{
     int frame_id;
-    int anchor_kf_id;            // 当前帧依赖的关键帧ID
-    Sophus::SE3d T_curr_anchor;  // 当前帧相对于该关键帧的相对变换
+    int anchor_kf_id;           // 当前帧依赖的关键帧ID
+    Sophus::SE3d T_curr_anchor; // 当前帧相对于该关键帧的相对变换
 };
 
-class Tracking {
+class Tracking
+{
 public:
-    Tracking(StereoVO* vo, std::shared_ptr<Map> pMap, LocalMapping* local_mapper, KeyframeSelector* selector);
+    Tracking(StereoVO *vo, std::shared_ptr<Map> pMap, LocalMapping *local_mapper, KeyframeSelector *selector);
     ~Tracking() = default;
 
-    Sophus::SE3d GrabImageStereo(const cv::Mat& img_curr_l, const cv::Mat& img_curr_r, int frame_id);
+    Sophus::SE3d GrabImageStereo(const cv::Mat &img_curr_l, const cv::Mat &img_curr_r, int frame_id);
 
     cv::Mat GetVizImage();
 
@@ -29,10 +31,10 @@ public:
     std::vector<FrameRecord> GetTrajectoryRecords() { return mTrajectoryRecords; }
 
 private:
-    StereoVO* mpVO;
+    StereoVO *mpVO;
     std::shared_ptr<Map> mpMap;
-    LocalMapping* mpLocalMapper;
-    KeyframeSelector* mpSelector;
+    LocalMapping *mpLocalMapper;
+    KeyframeSelector *mpSelector;
 
     bool mbInitialized;
     Sophus::SE3d mGlobalPose;

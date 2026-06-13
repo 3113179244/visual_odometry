@@ -19,6 +19,7 @@ find_package(DBoW3 REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 include_directories(${CERES_INCLUDE_DIRS})
 include_directories(${DBoW3_INCLUDE_DIRS}) # 包含词袋头文件路径
+include_directories(utils)
 
 add_executable(main 
     main.cpp 
