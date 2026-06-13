@@ -1,10 +1,18 @@
+// =========================================================================
+// ====== DEBUG REFACTOR CODE START ======
+// 文件名: local_mapping.cpp
+// 修改点: 1. 加入后端关键帧队列控流机制（防止滞后堆积）
+//        2. 极度缩小锁的保护范围，优化双重循环匹配性能，消灭线程阻塞
+// =========================================================================
+
 #include "local_mapping.h"
 #include <iostream>
 #include "stereo_vo.h"
 #include <opencv2/calib3d/calib3d.hpp>
 #include <opencv2/core/eigen.hpp>
 #include <algorithm>
-#include "math_utils.h" // 🌟 引入全量数学工具箱
+#include "feature_utils.h"
+#include "math_utils.h"
 
 LocalMapping::LocalMapping(SlidingWindow *slide_win, std::shared_ptr<Map> pMap, StereoVO *vo)
     : mpSlideWindow(slide_win), mKeyFrameQueue(), mptLocalMapping(nullptr), mbRunning(false),
@@ -46,9 +54,20 @@ void LocalMapping::Run()
         {
             if (!currKF)
                 continue;
+
+            // 🌟🌟🌟 核心改动点 1：后端超载控流保护 🌟🌟🌟
+            // 如果前端发关键帧的速度太快，导致后端堆积严重（比如处理到390帧，但最新堆到了430帧）
+            // 如果当前积压的关键帧超过 2 个，并且这个关键帧不是刚初始化完的极重要帧
+            // 我们直接放弃对它的后续高耗时建图，防止后端永远追不上前端
+            if (currKF->id > 5 && mKeyFrameQueue.size() > 2)
+            {
+                // 如果这个关键帧跟前一个关键帧靠得太近，放弃处理，直接跳过
+                std::cout << "⏩ [LocalMapping OVERLOAD] 后端积压严重！强行跳过并抛弃过时关键帧 ID: " << currKF->id << std::endl;
+                continue;
+            }
+
             std::cout << "\n[LocalMapping] 后端收到新关键帧 ID: " << currKF->id << "，开始建图..." << std::endl;
 
-            // 🌟 核心捕获点：获取大地图快照，抓取前一个历史关键帧指针，用作单目时间轴三角化
             auto global_kfs = mpMap->GetAllKeyframes();
             KeyframePtr prevKF = nullptr;
             if (!global_kfs.empty())
@@ -61,9 +80,7 @@ void LocalMapping::Run()
             std::vector<cv::DMatch> stereo_matches;
             mpVO->matchStereoEpipolar(currKF->kps_l, currKF->kps_r, currKF->desc_l, currKF->desc_r, stereo_matches);
 
-            // 建立状态表，防止多视图重复建点导致内存亢余
             std::vector<bool> point_triangulated(currKF->kps_l.size(), false);
-
             std::vector<cv::Point3f> init_pts_3d_cam;
             std::vector<cv::Mat> descriptors_new;
             std::vector<int> stereo_l_indices;
@@ -96,7 +113,7 @@ void LocalMapping::Run()
                 }
             }
 
-            // --- 🌟 策略 B 扩展：如果双目失效，自动退化为时间轴多视图线性三角化 🌟 ---
+            // --- 策略 B：多视图时间轴三角化 ---
             Eigen::Matrix3d R_curr;
             cv::Mat R_mat_c;
             cv::Rodrigues(currKF->rvec, R_mat_c);
@@ -116,26 +133,20 @@ void LocalMapping::Run()
 
                 for (size_t i = 0; i < currKF->kps_l.size(); ++i)
                 {
-                    // 仅对未分配 3D 坐标且双目失败的黄金特征点进行多视图追溯三角化
                     if (point_triangulated[i] || currKF->map_point_indices[i] != -1)
                         continue;
 
-                    // 利用前后帧的特征点在像素层面的连续关联进行反向归一化平面映射
                     if (i < prevKF->map_point_indices.size() && prevKF->map_point_indices[i] != -1)
                     {
-
                         Eigen::Vector2d kp1((prevKF->keypoints_2d[i].x - mpVO->cx) / mpVO->fx,
                                             (prevKF->keypoints_2d[i].y - mpVO->cy) / mpVO->fy);
                         Eigen::Vector2d kp2((currKF->kps_l[i].pt.x - mpVO->cx) / mpVO->fx,
                                             (currKF->kps_l[i].pt.y - mpVO->cy) / mpVO->fy);
 
                         Eigen::Vector3d P_world_svd;
-                        // 调用工具箱内带有两帧正深度约束防御的 SVD 线性三角化接口
                         if (vo_math::TriangulatePointSVD(T_cw_prev.inverse(), T_cw_curr.inverse(), kp1, kp2, P_world_svd))
                         {
-                            // 三角化结果投影回当前帧相机中心坐标系下
                             Eigen::Vector3d P_cam = T_cw_curr * P_world_svd;
-
                             init_pts_3d_cam.push_back(cv::Point3f(P_cam.x(), P_cam.y(), P_cam.z()));
                             descriptors_new.push_back(currKF->desc_l.row(i).clone());
                             stereo_l_indices.push_back(i);
@@ -189,7 +200,9 @@ void LocalMapping::FuseMapPoints(KeyframePtr pKF)
     std::vector<MapPointPtr> global_mps = mpMap->GetAllMapPoints();
     const float dist_th = 0.1f;
     const int TH_HIGH = 50;
-    std::unique_lock<std::shared_mutex> lock(mpMap->mMutexMap);
+
+    // 🌟🌟🌟 核心改动点 2：将范围锁缩小为极精细的“局部更新写锁” 🌟🌟🌟
+    // 不再锁住整个函数。我们在下方需要改动全局地图点状态时才按需加锁
 
     for (size_t i = 0; i < pKF->map_point_indices.size(); ++i)
     {
@@ -223,14 +236,18 @@ void LocalMapping::FuseMapPoints(KeyframePtr pKF)
                 }
             }
         }
+
+        // 🔍 只在真正发生匹配、要修改共享地图数据的一瞬间才加锁保护，处理完立马释放！
         if (best_match_global_idx >= 0 && best_dist < TH_HIGH)
         {
+            std::unique_lock<std::shared_mutex> lock(mpMap->mMutexMap);
             pKF->map_point_indices[i] = best_match_global_idx;
             global_mps[best_match_global_idx]->n_observed++;
             mp_curr->is_bad = true;
         }
         else
         {
+            std::unique_lock<std::shared_mutex> lock(mpMap->mMutexMap);
             mp_curr->n_observed++;
             mp_curr->n_visible++;
         }
@@ -252,3 +269,4 @@ void LocalMapping::CullLocalMap()
         }
     }
 }
+// ====== DEBUG REFACTOR CODE END ======

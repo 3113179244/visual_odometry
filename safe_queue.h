@@ -54,6 +54,22 @@ public:
         m_cond.notify_all();
     }
 
+    // ====== DEBUG REFACTOR CODE START ======
+    // 💡 新增：线程安全地获取当前队列中积压的元素数量
+    size_t size()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return m_queue.size();
+    }
+
+    // 💡 新增：线程安全地判断当前队列是否为空
+    bool empty()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return m_queue.empty();
+    }
+    // ====== DEBUG REFACTOR CODE END ======
+
 private:
     std::queue<T> m_queue;
     std::mutex m_mutex;

@@ -4,195 +4,59 @@
 #include <algorithm>
 #include <opencv2/calib3d/calib3d.hpp>
 #include <opencv2/core/eigen.hpp>
+// ====== DEBUG REFACTOR CODE START ======
+#include "feature_utils.h"
+// ====== DEBUG REFACTOR CODE END ======
 
 using namespace std;
 using namespace cv;
 
-void ExtractorNode::DivideNode(ExtractorNode &n1, ExtractorNode &n2, ExtractorNode &n3, ExtractorNode &n4)
-{
-    const int halfX = ceil(static_cast<float>(UR.x - UL.x) / 2);
-    const int halfY = ceil(static_cast<float>(BR.y - UL.y) / 2);
-
-    n1.UL = UL;
-    n1.UR = Point2i(UL.x + halfX, UL.y);
-    n1.BL = Point2i(UL.x, UL.y + halfY);
-    n1.BR = Point2i(UL.x + halfX, UL.y + halfY);
-    n2.UL = n1.UR;
-    n2.UR = UR;
-    n2.BL = n1.BR;
-    n2.BR = Point2i(UR.x, UL.y + halfY);
-    n3.UL = n1.BL;
-    n3.UR = n1.BR;
-    n3.BL = BL;
-    n3.BR = Point2i(n1.BR.x, BL.y);
-    n4.UL = n3.UR;
-    n4.UR = n2.BR;
-    n4.BL = n3.BR;
-    n4.BR = BR;
-
-    n1.vKeys.reserve(vKeys.size());
-    n2.vKeys.reserve(vKeys.size());
-    n3.vKeys.reserve(vKeys.size());
-    n4.vKeys.reserve(vKeys.size());
-
-    for (size_t i = 0; i < vKeys.size(); i++)
-    {
-        const KeyPoint &kp = vKeys[i];
-        if (kp.pt.x < n1.UR.x)
-        {
-            if (kp.pt.y < n1.BR.y)
-                n1.vKeys.push_back(kp);
-            else
-                n3.vKeys.push_back(kp);
-        }
-        else
-        {
-            if (kp.pt.y < n1.BR.y)
-                n2.vKeys.push_back(kp);
-            else
-                n4.vKeys.push_back(kp);
-        }
-    }
-
-    if (n1.vKeys.size() == 1)
-        n1.bNoMore = true;
-    if (n2.vKeys.size() == 1)
-        n2.bNoMore = true;
-    if (n3.vKeys.size() == 1)
-        n3.bNoMore = true;
-    if (n4.vKeys.size() == 1)
-        n4.bNoMore = true;
-}
-
-vector<KeyPoint> StereoVO::DistributeQuadTree(const vector<KeyPoint> &vToDistributeKeys, int minX, int maxX, int minY, int maxY, int N)
-{
-    if (vToDistributeKeys.size() < (size_t)N)
-        return vToDistributeKeys;
-
-    const int nIni = round(static_cast<float>(maxX - minX) / (maxY - minY));
-    const float hX = static_cast<float>(maxX - minX) / nIni;
-
-    list<ExtractorNode> lNodes;
-    vector<ExtractorNode *> vpIniNodes(nIni);
-
-    for (int i = 0; i < nIni; i++)
-    {
-        ExtractorNode ni;
-        ni.UL = Point2i(hX * static_cast<float>(i), minY);
-        ni.UR = Point2i(hX * static_cast<float>(i + 1), minY);
-        ni.BL = Point2i(ni.UL.x, maxY);
-        ni.BR = Point2i(ni.UR.x, maxY);
-        ni.vKeys.reserve(vToDistributeKeys.size());
-        lNodes.push_back(ni);
-        vpIniNodes[i] = &lNodes.back();
-    }
-
-    for (size_t i = 0; i < vToDistributeKeys.size(); i++)
-    {
-        const KeyPoint &kp = vToDistributeKeys[i];
-        vpIniNodes[kp.pt.x / hX]->vKeys.push_back(kp);
-    }
-
-    auto lit = lNodes.begin();
-    while (lit != lNodes.end())
-    {
-        if (lit->vKeys.size() == 1)
-        {
-            lit->bNoMore = true;
-            lit++;
-        }
-        else if (lit->vKeys.empty())
-            lit = lNodes.erase(lit);
-        else
-            lit++;
-    }
-
-    bool bFinish = false;
-    while (!bFinish)
-    {
-        int nToExpand = 0;
-        lit = lNodes.begin();
-        while (lit != lNodes.end())
-        {
-            if (lit->bNoMore)
-            {
-                lit++;
-                continue;
-            }
-            ExtractorNode n1, n2, n3, n4;
-            lit->DivideNode(n1, n2, n3, n4);
-
-            if (n1.vKeys.size() > 0)
-            {
-                lNodes.push_front(n1);
-                if (n1.vKeys.size() > 1)
-                {
-                    nToExpand++;
-                    lNodes.front().lit = lNodes.begin();
-                }
-            }
-            if (n2.vKeys.size() > 0)
-            {
-                lNodes.push_front(n2);
-                if (n2.vKeys.size() > 1)
-                {
-                    nToExpand++;
-                    lNodes.front().lit = lNodes.begin();
-                }
-            }
-            if (n3.vKeys.size() > 0)
-            {
-                lNodes.push_front(n3);
-                if (n3.vKeys.size() > 1)
-                {
-                    nToExpand++;
-                    lNodes.front().lit = lNodes.begin();
-                }
-            }
-            if (n4.vKeys.size() > 0)
-            {
-                lNodes.push_front(n4);
-                if (n4.vKeys.size() > 1)
-                {
-                    nToExpand++;
-                    lNodes.front().lit = lNodes.begin();
-                }
-            }
-
-            lit = lNodes.erase(lit);
-        }
-        if ((int)lNodes.size() >= N || nToExpand == 0)
-            bFinish = true;
-    }
-
-    vector<KeyPoint> vResultKeys;
-    vResultKeys.reserve(lNodes.size());
-    for (lit = lNodes.begin(); lit != lNodes.end(); lit++)
-    {
-        vector<KeyPoint> &vNodeKeys = lit->vKeys;
-        KeyPoint *pKP = &vNodeKeys[0];
-        float maxResponse = pKP->response;
-        for (size_t k = 1; k < vNodeKeys.size(); k++)
-        {
-            if (vNodeKeys[k].response > maxResponse)
-            {
-                pKP = &vNodeKeys[k];
-                maxResponse = vNodeKeys[k].response;
-            }
-        }
-        vResultKeys.push_back(*pKP);
-    }
-    return vResultKeys;
-}
-
 void StereoVO::extractORBWithQuadTree(const Mat &img, vector<KeyPoint> &kps, Mat &desc, int num_features)
 {
-    Ptr<ORB> orb_detector = ORB::create(num_features * 2);
+    Ptr<ORB> orb_handler = ORB::create(num_features * 2);
+
+    // ====== DEBUG REFACTOR CODE START ======
+    // 🌟🌟🌟 构建车载相机专用的 ROI 拦截掩码 (Mask) 🌟🌟🌟
+    // 全白（255）代表允许提取，全黑（0）代表强行拦截禁止提取
+    cv::Mat mask = cv::Mat::ones(img.size(), CV_8U) * 255;
+
+    int rows = img.rows;
+    int cols = img.cols;
+
+    // 1. 拦截左侧及左上方的细碎树丛/天空噪声区 (x从0到 cols*0.35, y从0到 rows*0.45)
+    cv::Rect left_tree_zone(0, 0, static_cast<int>(cols * 0.35), static_cast<int>(rows * 0.45));
+    mask(left_tree_zone).setTo(0);
+
+    // 2. 拦截最下方的本车引擎盖盲区 (y从 rows*0.88 直到图像底部)
+    cv::Rect car_hood_zone(0, static_cast<int>(rows * 0.88), cols, rows - static_cast<int>(rows * 0.88));
+    mask(car_hood_zone).setTo(0);
+
     vector<KeyPoint> vIniKeys;
-    orb_detector->detect(img, vIniKeys);
-    kps = DistributeQuadTree(vIniKeys, 0, img.cols, 0, img.rows, num_features);
-    Ptr<ORB> orb_descriptor = ORB::create();
-    orb_descriptor->compute(img, kps, desc);
+    // 将构建好的 mask 注入 detect 算子，OpenCV 会自动避开黑色区域
+    orb_handler->detect(img, vIniKeys, mask);
+    // ====== DEBUG REFACTOR CODE END ======
+
+    // 调用工具箱进行空间均匀分发
+    kps = vo_feature::DistributeQuadTree(vIniKeys, 0, img.cols, 0, img.rows, num_features);
+
+    if (!kps.empty())
+    {
+        // 先备份四叉树筛选出的黄金点合法的 response
+        vector<float> response_backup(kps.size());
+        for (size_t i = 0; i < kps.size(); ++i)
+        {
+            response_backup[i] = kps[i].response;
+        }
+
+        // 计算描述子 (防止 OpenCV 内部抹零篡改)
+        orb_handler->compute(img, kps, desc);
+
+        // 强行把正确的响应写回
+        for (size_t i = 0; i < kps.size(); ++i)
+        {
+            kps[i].response = response_backup[i];
+        }
+    }
 }
 
 bool StereoVO::loadCalibration(const string &calib_file_path)
@@ -357,7 +221,6 @@ void StereoVO::matchTemporalByProjection(const std::vector<cv::KeyPoint> &kps_pr
 
     for (size_t i = 0; i < pts_3d_prev.size(); i++)
     {
-        // 【核心修改点】：加入行边界防御，防止 OpenCV compute 阶段剔除边界特征导致 rows 不对齐越界崩溃
         if (i >= (size_t)desc_prev.rows)
             continue;
 

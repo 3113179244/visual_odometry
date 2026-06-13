@@ -32,4 +32,9 @@ private:
     std::unique_ptr<Tracking> mpTracker;
 
     std::atomic<bool> mbRunning;
+
+    // ====== DEBUG CODE START ======
+    // 用于控制单步执行的原子布尔变量，初始为 false (暂停状态)
+    std::atomic<bool> mbStepToNextFrame{false};
+    // ====== DEBUG CODE END ======
 };

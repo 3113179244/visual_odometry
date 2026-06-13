@@ -64,11 +64,26 @@ void System::Run(const std::string &path_left, const std::string &path_right, co
     int max_frames = files_left.size() - 1;
     cout << "== SLAM 系统启动 (后端滑窗全量同步模式)，共 " << max_frames + 1 << " 帧 ==" << endl;
 
+    // ====== DEBUG CODE START ======
+    cout << "💡 [调试断点模式已激活] 聚焦到窗口后：按下 【空格键】 读入下一帧，按下 【ESC】 退出系统。" << endl;
+    mbStepToNextFrame = false; // 默认阻塞，等待按下第一次空格
+    // ====== DEBUG CODE END ======
+
     std::vector<Sophus::SE3d> all_frame_poses;
 
     std::thread tracker_thread([&]()
                                {
         for (int i = 0; i <= max_frames && mbRunning; ++i) {
+            
+            // ====== DEBUG CODE START ======
+            // 单步条件阻塞：若未按下空格且系统未关闭，则在此死循环等待
+            while (!mbStepToNextFrame && mbRunning) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (!mbRunning) break;
+            mbStepToNextFrame = false; // 重置信号，消费掉本次单步推进指令
+            // ====== DEBUG CODE END ======
+
             cv::Mat img_curr_l = cv::imread(files_left[i], cv::IMREAD_GRAYSCALE);
             cv::Mat img_curr_r = cv::imread(files_right[i], cv::IMREAD_GRAYSCALE);
             if (img_curr_l.empty() || img_curr_r.empty()) break;
@@ -142,12 +157,21 @@ void System::Run(const std::string &path_left, const std::string &path_right, co
         {
             cv::imshow("VO Feature Tracking (Viewer Thread)", img_show);
         }
-        int key = cv::waitKey(30);
-        if (key == 27)
+
+        // ====== DEBUG CODE START ======
+        // 降低 waitKey 的等待时间以快速捕捉键盘输入
+        int key = cv::waitKey(10);
+        if (key == 32) // Space 键 ASCII 为 32
+        {
+            mbStepToNextFrame = true; // 解锁阻塞，读取下一帧
+            cout << "▶️ [Viewer Thread] 检测到空格键按下，推进读入下一帧..." << endl;
+        }
+        else if (key == 27) // ESC 键
         {
             mbRunning = false;
             break;
         }
+        // ====== DEBUG CODE END ======
     }
 
     if (tracker_thread.joinable())
