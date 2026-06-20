@@ -11,7 +11,6 @@ void Map::AddMapPoint(std::shared_ptr<MapPoint> pMP) {
 
 std::vector<std::shared_ptr<MapPoint>> Map::GetAllMapPoints() {
     std::unique_lock<std::mutex> lock(mMutexMap);
-    // 返回容器的副本，这样即使其他线程修改了原容器，当前读取线程也不会崩溃
     return mspMapPoints; 
 }
 
@@ -20,7 +19,19 @@ int Map::GetMapPointsSize() {
     return mspMapPoints.size();
 }
 
+// --- 以下为新增关键帧数据结构实现 ---
+void Map::AddKeyFrame(std::shared_ptr<KeyFrame> pKF) {
+    std::unique_lock<std::mutex> lock(mMutexMap);
+    mspKeyFrames.push_back(pKF);
+}
+
+std::vector<std::shared_ptr<KeyFrame>> Map::GetAllKeyFrames() {
+    std::unique_lock<std::mutex> lock(mMutexMap);
+    return mspKeyFrames;
+}
+
 void Map::Clear() {
     std::unique_lock<std::mutex> lock(mMutexMap);
     mspMapPoints.clear();
+    mspKeyFrames.clear(); // 同时清空关键帧
 }

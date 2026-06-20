@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
-project(stereovo_ros2)
+project(Stereovo_ros2)
 
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 14) # 同步 VINS 标配 C++14 (或 17 均可)
+  set(CMAKE_CXX_STANDARD 14) 
 endif()
 
 add_compile_options(-Wextra -Wpedantic)
@@ -80,13 +80,13 @@ ament_target_dependencies(${PROJECT_NAME}_lib
 # -----------------------------------------------------------------------------
 # 5. 创建 ROS 2 可执行节点主入口
 # -----------------------------------------------------------------------------
-add_executable(stereovo_node src/stereovo_node.cpp)
+add_executable(Stereovo_node src/Stereovo_node.cpp)
 
 # 链接内部核心算法库
-target_link_libraries(stereovo_node ${PROJECT_NAME}_lib) 
+target_link_libraries(Stereovo_node ${PROJECT_NAME}_lib) 
 
 # 链接节点所需的 ROS 2 属性
-ament_target_dependencies(stereovo_node
+ament_target_dependencies(Stereovo_node
   rclcpp 
   rcpputils 
   std_msgs 
@@ -104,7 +104,7 @@ ament_target_dependencies(stereovo_node
 # 6. 安装与导出规则 (ROS 2 标准)
 # -----------------------------------------------------------------------------
 # 安装二进制可执行文件与核心库
-install(TARGETS stereovo_node ${PROJECT_NAME}_lib
+install(TARGETS Stereovo_node ${PROJECT_NAME}_lib
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

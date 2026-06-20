@@ -1,8 +1,8 @@
-#include <memory>   // 引入智能指针相关库（如 std::shared_ptr）
+#include <memory>   // 引入智能指针相关库
 #include <queue>    // 引入队列容器，用于缓存传感器图像数据
 #include <mutex>    // 引入互斥锁相关库，用于多线程间的线程安全保护
 #include <thread>   // 引入多线程相关库
-#include <chrono>   // 引入时间相关库，用于线程休眠控制
+#include <chrono>   // 引入时间相关库
 #include <iostream> 
 #include <string>
 #include <vector>
@@ -17,14 +17,12 @@
 #include <cv_bridge/cv_bridge.h>                     // 负责 ROS 图像与 OpenCV Mat 的转换
 #include <opencv2/opencv.hpp>                        // 引入 OpenCV 核心库
 #include <Eigen/Core>                                // 引入 Eigen 核心库
-#include <Eigen/Geometry>                            // 引入 Eigen 几何库（用于四元数转换）
+#include <Eigen/Geometry>                            // 引入 Eigen 几何库
 
-#include "Tracking.h"   // 引入你的前端光流追踪模块
-#include "Map.h"        // 引入你的地图/路标点管理模块
-#include "MapPoint.h"   // 引入地图点结构
+#include "Tracking.h"   // 引入前端追踪模块空壳
+#include "Map.h"        // 引入地图管理模块
 #include "Parameters.h" // 引入参数解析模块
 
-// 定义整个双目视觉里程计节点管理类
 class StereoVONode {
 public:
     StereoVONode() {
@@ -53,7 +51,7 @@ public:
         // 5. 开启独立同步处理线程
         sync_thread_ = std::thread(&StereoVONode::sync_process, this);
 
-        RCLCPP_INFO(node_->get_logger(), "节点启动成功！已成功挂载外部话题并初始化算法流。");
+        RCLCPP_INFO(node_->get_logger(), "ROS2 节点启动成功！已挂载话题并拉起同步线程。");
     }
 
     ~StereoVONode() {
@@ -75,7 +73,6 @@ private:
         img1_buf_.push(img_msg);                  
     }
 
-    // 将 ROS 图像消息转换为 OpenCV cv::Mat 灰度图的辅助函数
     cv::Mat getImageFromMsg(const sensor_msgs::msg::Image::SharedPtr &img_msg) {
         cv_bridge::CvImagePtr cv_ptr;
         try {
@@ -98,7 +95,7 @@ private:
                 double time0 = img0_buf_.front()->header.stamp.sec + img0_buf_.front()->header.stamp.nanosec * 1e-9;
                 double time1 = img1_buf_.front()->header.stamp.sec + img1_buf_.front()->header.stamp.nanosec * 1e-9;
 
-                // 严格时间戳对齐
+                // 严格时间戳对齐 (视差小于 3ms 视为同一瞬间捕获的双目图像)
                 if (time0 < time1 - 0.003) {
                     img0_buf_.pop(); 
                 } 
@@ -119,19 +116,17 @@ private:
             }
             m_buf_.unlock(); 
 
-            // 如果成功从外部话题拿到了对齐的双目图像
             if (img0 && img1) {
                 double sync_time = img0->header.stamp.sec + img0->header.stamp.nanosec * 1e-9;
 
-                // 1. 转换格式
                 cv::Mat mat0 = getImageFromMsg(img0);
                 cv::Mat mat1 = getImageFromMsg(img1);
 
                 if (!mat0.empty() && !mat1.empty()) {
-                    // 2. 真正恢复调用你的 SLAM 核心算法前端，并拿到当前帧算出的位姿
+                    // 调用你的纯空壳 Tracking 入口，验证控制流是否接通
                     Eigen::Isometry3d Tcw = mpTracker->GrabImageStereo(mat0, mat1, sync_time);
                     
-                    // 3. 触发核心话题对外发布，传入最新算出的真实位姿
+                    // 触发 ROS 2 数据话题对外发布
                     publishTopics(img0->header, img0, Tcw); 
                 }
             }
@@ -140,87 +135,51 @@ private:
         }
     }
 
-    // 增加了 Eigen 位姿矩阵参数，用于提取并发布给 Rviz2
     void publishTopics(const std_msgs::msg::Header& header, 
                        const sensor_msgs::msg::Image::SharedPtr raw_img,
                        const Eigen::Isometry3d& Tcw) 
     {
-        // SLAM 前端通常输出的是 Tcw（从世界系变换到相机系），求逆后得到 Twc（机体/相机在世界系下的绝对位姿）
         Eigen::Isometry3d Twc = Tcw.inverse();
-        
-        // 从位姿矩阵中提取平移向量 (X, Y, Z)
         Eigen::Vector3d translation = Twc.translation();
-        // 从位姿矩阵中提取旋转矩阵并直接转换为四元数
         Eigen::Quaterniond rotation(Twc.rotation());
 
-        // 1. 组装并发布里程计话题 (/odometry)
+        // 1. 发布里程计话题 (/odometry)
         auto odom_msg = nav_msgs::msg::Odometry();
         odom_msg.header = header;                 
         odom_msg.header.frame_id = "world";       
         odom_msg.child_frame_id = "body";         
         
-        // 填充真实的坐标值
         odom_msg.pose.pose.position.x = translation.x();
         odom_msg.pose.pose.position.y = translation.y();
         odom_msg.pose.pose.position.z = translation.z();
-        // 填充真实的四元数朝向
         odom_msg.pose.pose.orientation.w = rotation.w();
         odom_msg.pose.pose.orientation.x = rotation.x();
         odom_msg.pose.pose.orientation.y = rotation.y();
         odom_msg.pose.pose.orientation.z = rotation.z();
         pub_odom_->publish(odom_msg);             
 
-        // 2. 组装并发布历史轨迹话题 (/path)
+        // 2. 发布历史轨迹话题 (/path)
         geometry_msgs::msg::PoseStamped current_pose;
         current_pose.header = header;
         current_pose.header.frame_id = "world";
         current_pose.pose = odom_msg.pose.pose;
-        mv_path_poses_.push_back(current_pose); // 压入历史队列
+        mv_path_poses_.push_back(current_pose);
 
         auto path_msg = nav_msgs::msg::Path();
         path_msg.header = header;                 
         path_msg.header.frame_id = "world";       
-        path_msg.poses = mv_path_poses_;        // 填充整条轨迹序列
+        path_msg.poses = mv_path_poses_;        
         pub_path_->publish(path_msg);             
 
-        // 3. 组装并发布稀疏点云话题 (/point_cloud)
-        // 获取地图中当前所有的三维点云坐标，直接序列化组装为标准的 PointCloud2 消息
+        // 3. 发布空白点云话题 (/point_cloud)
         auto cloud_msg = sensor_msgs::msg::PointCloud2();
         cloud_msg.header = header;                 
         cloud_msg.header.frame_id = "world";       
-        
-        std::vector<std::shared_ptr<MapPoint>> vpMPs = mpMap->GetAllMapPoints();
-        int num_points = vpMPs.size();
-        
-        // 设定二进制点云结构属性 (X, Y, Z 均采用 float 类型，共占 12 字节)
         cloud_msg.height = 1;
-        cloud_msg.width = num_points;
-        cloud_msg.is_dense = false;
-        cloud_msg.is_bigendian = false;
-
-        sensor_msgs::msg::PointField f_x, f_y, f_z;
-        f_x.name = "x"; f_x.offset = 0; f_x.datatype = sensor_msgs::msg::PointField::FLOAT32; f_x.count = 1;
-        f_y.name = "y"; f_y.offset = 4; f_y.datatype = sensor_msgs::msg::PointField::FLOAT32; f_y.count = 1;
-        f_z.name = "z"; f_z.offset = 8; f_z.datatype = sensor_msgs::msg::PointField::FLOAT32; f_z.count = 1;
-        cloud_msg.fields = {f_x, f_y, f_z};
-        cloud_msg.point_step = 12;
-        cloud_msg.row_step = cloud_msg.point_step * num_points;
-        cloud_msg.data.resize(cloud_msg.row_step);
-
-        if (num_points > 0) {
-            float* float_data = reinterpret_cast<float*>(cloud_msg.data.data());
-            for (int i = 0; i < num_points; i++) {
-                if (vpMPs[i]) {
-                    Eigen::Vector3d p_w = vpMPs[i]->GetWorldPos();
-                    float_data[3 * i + 0] = static_cast<float>(p_w.x());
-                    float_data[3 * i + 1] = static_cast<float>(p_w.y());
-                    float_data[3 * i + 2] = static_cast<float>(p_w.z());
-                }
-            }
-        }
+        cloud_msg.width = 0; // 算法暂时为空，点云数量为 0
         pub_cloud_->publish(cloud_msg);           
 
-        // 4. 发布特征图传
+        // 4. 发布原特征图传
         if (raw_img) {
             pub_feat_img_->publish(*raw_img);    
         }
@@ -228,7 +187,6 @@ private:
 
 private:
     std::shared_ptr<rclcpp::Node> node_; 
-
     std::shared_ptr<Map> mpMap;           
     std::shared_ptr<Tracking> mpTracker;   
 
@@ -245,7 +203,6 @@ private:
     std::mutex m_buf_;                                       
     std::thread sync_thread_;                                
 
-    // 用于在内存中持续维护历史运动路径的容器
     std::vector<geometry_msgs::msg::PoseStamped> mv_path_poses_;
 };
 
