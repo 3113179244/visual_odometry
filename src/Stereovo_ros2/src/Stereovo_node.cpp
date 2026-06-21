@@ -182,21 +182,23 @@ private:
         pub_latest_odometry_->publish(odom);
     }
 
+    // 1. 改变函数签名，接收原始位姿和 ROS 位姿
     void PublishOdometry(const std_msgs::msg::Header &header,
-                         const Eigen::Vector3d &P, const Eigen::Quaterniond &Q)
+                         const Eigen::Vector3d &P_ros, const Eigen::Quaterniond &Q_ros,
+                         const Eigen::Vector3d &P_cam, const Eigen::Matrix3d &R_cam)
     {
-        // 1. 发布标准 ROS 里程计
+        // 1. 发布标准 ROS 里程计（使用 ROS 坐标系）
         nav_msgs::msg::Odometry odom;
         odom.header = header;
         odom.header.frame_id = "world";
         odom.child_frame_id = "body";
-        odom.pose.pose.position.x = P.x();
-        odom.pose.pose.position.y = P.y();
-        odom.pose.pose.position.z = P.z();
-        odom.pose.pose.orientation.x = Q.x();
-        odom.pose.pose.orientation.y = Q.y();
-        odom.pose.pose.orientation.z = Q.z();
-        odom.pose.pose.orientation.w = Q.w();
+        odom.pose.pose.position.x = P_ros.x();
+        odom.pose.pose.position.y = P_ros.y();
+        odom.pose.pose.position.z = P_ros.z();
+        odom.pose.pose.orientation.x = Q_ros.x();
+        odom.pose.pose.orientation.y = Q_ros.y();
+        odom.pose.pose.orientation.z = Q_ros.z();
+        odom.pose.pose.orientation.w = Q_ros.w();
         pub_odometry_->publish(odom);
 
         // 2. 累加并发布路径
@@ -206,6 +208,10 @@ private:
         pose_stamped.pose = odom.pose.pose;
 
         std::lock_guard<std::mutex> lock(path_mutex_);
+        if (mv_path_poses_.size() > 2000)
+        { // 顺便防止上一轮提到的内存暴涨问题
+            mv_path_poses_.erase(mv_path_poses_.begin());
+        }
         mv_path_poses_.push_back(pose_stamped);
 
         nav_msgs::msg::Path path_msg;
@@ -218,31 +224,28 @@ private:
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header = header;
         transformStamped.child_frame_id = "body";
-        transformStamped.transform.translation.x = P.x();
-        transformStamped.transform.translation.y = P.y();
-        transformStamped.transform.translation.z = P.z();
-        transformStamped.transform.rotation.x = Q.x();
-        transformStamped.transform.rotation.y = Q.y();
-        transformStamped.transform.rotation.z = Q.z();
-        transformStamped.transform.rotation.w = Q.w();
+        transformStamped.transform.translation.x = P_ros.x();
+        transformStamped.transform.translation.y = P_ros.y();
+        transformStamped.transform.translation.z = P_ros.z();
+        transformStamped.transform.rotation.x = Q_ros.x();
+        transformStamped.transform.rotation.y = Q_ros.y();
+        transformStamped.transform.rotation.z = Q_ros.z();
+        transformStamped.transform.rotation.w = Q_ros.w();
         tf_broadcaster_->sendTransform(transformStamped);
 
-        // 4. 【核心修改】直接自动保存为标准的 KITTI 格式 (12列，空格分隔)
+        // 4. 【核心修复】保存轨迹文件时，严格使用相机坐标系的 P_cam 和 R_cam
         std::string kitti_filename = Parameters::OUTPUT_PATH + "trajectory.txt";
         std::ofstream foutK(kitti_filename, std::ios::app);
         if (foutK.is_open())
         {
             foutK.setf(std::ios::fixed, std::ios::floatfield);
-            foutK.precision(6); // KITTI 矩阵的标准保留精度
-            
-            // 将四元数转为 3x3 旋转矩阵
-            Eigen::Matrix3d R = Q.toRotationMatrix();
-            
-            // 严格按照 KITTI 格式单行写入：R11 R12 R13 Tx R21 R22 R23 Ty R31 R32 R33 Tz
-            foutK << R(0,0) << " " << R(0,1) << " " << R(0,2) << " " << P.x() << " "
-                  << R(1,0) << " " << R(1,1) << " " << R(1,2) << " " << P.y() << " "
-                  << R(2,0) << " " << R(2,1) << " " << R(2,2) << " " << P.z() << "\n";
-                  
+            foutK.precision(6);
+
+            // 写入真正的 KITTI 相机物理坐标系位姿
+            foutK << R_cam(0, 0) << " " << R_cam(0, 1) << " " << R_cam(0, 2) << " " << P_cam.x() << " "
+                  << R_cam(1, 0) << " " << R_cam(1, 1) << " " << R_cam(1, 2) << " " << P_cam.y() << " "
+                  << R_cam(2, 0) << " " << R_cam(2, 1) << " " << R_cam(2, 2) << " " << P_cam.z() << "\n";
+
             foutK.close();
         }
     }
@@ -477,13 +480,20 @@ private:
 
         Eigen::Isometry3d Twc = Tcw.inverse();
 
-        // 转换解算出的里程计位姿到 ROS 标准三维空间
-        Eigen::Vector3d P_ros = R_ros_cam * Twc.translation();
-        Eigen::Matrix3d R_ros = R_ros_cam * Twc.rotation() * R_ros_cam.transpose();
+        // 提取原始相机系的位姿（算法核心解算出来的物理轨迹）
+        Eigen::Vector3d P_cam = Twc.translation();
+        Eigen::Matrix3d R_cam = Twc.rotation();
+
+        // 转换解算出的里程计位姿到 ROS 标准三维空间（仅供 ROS RViz 话题显示）
+        Eigen::Vector3d P_ros = R_ros_cam * P_cam;
+        Eigen::Matrix3d R_ros = R_ros_cam * R_cam * R_ros_cam.transpose();
         Eigen::Quaterniond Q_ros(R_ros);
 
         PublishLatestOdometry(P_ros, Q_ros, timestamp);
-        PublishOdometry(header, P_ros, Q_ros);
+
+        // 【修改】同时把 ROS 位姿和原始相机位姿传进去
+        PublishOdometry(header, P_ros, Q_ros, P_cam, R_cam);
+
         PublishCameraPose(header, P_ros, Q_ros);
         PublishPointCloud(header, vWorldPoints);
         PublishKeyPoses(header, vKFPositions);
