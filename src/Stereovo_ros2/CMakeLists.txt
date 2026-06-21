@@ -59,7 +59,7 @@ add_library(${PROJECT_NAME}_lib
 # 链接第三方数学库
 target_link_libraries(${PROJECT_NAME}_lib 
   ${OpenCV_LIBS} 
-  ${CERES_LIBRARIES} # 在某些 Ceres 版本中也写作 Ceres::ceres
+  ${CERES_LIBRARIES} 
 )
 
 # 链接 ROS 2 依赖组件
