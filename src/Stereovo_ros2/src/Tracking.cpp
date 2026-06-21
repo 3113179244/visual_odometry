@@ -120,7 +120,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     vWorldPoints.clear();
     vKFPositions.clear();
 
-    // 提取局部变量，锁保护临界区拷贝，彻底解决前后端多线程位姿践踏（Data Race）
+    // 提取局部变量，锁保护临界区拷贝
     Eigen::Isometry3d localPose;
     {
         std::unique_lock<std::mutex> lock(mMutexBackend);
@@ -181,7 +181,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     mpFeatureDetector->AddNewFeatures(grayLeft);
 
     // 步长 4：挑选并判定当前帧是否为关键帧
-    // 【核心修复】如果 PnP 失败，说明当前位姿是不确定的历史脏位姿，绝不允许创建正常关键帧
     bool isKeyFrame = false;
     if (pnp_succ)
     {
@@ -189,8 +188,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     }
 
     // 步长 5：立体匹配与双目自适应深度三角化
-    // 【核心修复】双目三角化必须在每一帧无条件执行！
-    // 只有这样，在冷启动第二帧 PnP 因地图为空而必然失败时，双目三角化才能强行把初始 3D 点计算出来，从而让第三帧解算步入正轨。
+    // 【注意】TriangulateNewPoints 内部如果判定 isKeyFrame == true，已经自动执行了 mpMap->AddMapPoint(pMP)
     mpFeatureDetector->TriangulateNewPoints(
         grayLeft, grayRight, localPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
         mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);
@@ -209,14 +207,11 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
         mvpPrevKFPointsMap = currentMeasurements;
 
-        for (const auto &id : mpFeatureDetector->mvIds)
-        {
-            auto it = mmIDToMapPoint.find(id);
-            if (it != mmIDToMapPoint.end())
-            {
-                mpMap->AddMapPoint(it->second);
-            }
-        }
+        // =========================================================================
+        // 【核心修复一】彻底删除了原先这里的 mmIDToMapPoint 循环二次 AddMapPoint 逻辑
+        // 原因：Step 5 内部已经把新三角化的路标点指针安全加入了 mpMap 数据库。
+        // 如果这里再加一遍，会导致同一个 MapPoint 实例在 vector 容器里重复叠加，造成严重的内存臃肿。
+        // =========================================================================
 
         // 异步唤醒常驻在后台的 Ceres 优化线程
         {
@@ -226,7 +221,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         mCondBackend.notify_one();
     }
 
-    // 优化控制台打印：不再输出让人恐慌的无用警告，而是提供清晰的系统提示
+    // 优化控制台打印：提供清晰的系统提示
     if (!pnp_succ)
     {
         std::cout << ">>> [SLAM前端] 提示：PnP 暂无足够追踪点（如冷启动首帧或发生短暂遮挡），已通过双目实时三角化构建/恢复结构。" << std::endl;
@@ -307,13 +302,12 @@ void Tracking::BackendLoop()
         std::cout << ">>> [后端优化] 异步线程触发 10 帧滑动窗口局部 BA 优化..." << std::endl;
         Optimizer::LocalBundleAdjustment(mpMap, 10);
 
-        // 优化结束后，平滑反馈并校正前端当前的位姿缓存
-        auto allKFs = mpMap->GetAllKeyFrames();
-        if (!allKFs.empty())
-        {
-            auto latestKF = allKFs.back();
-            std::unique_lock<std::mutex> lock(mMutexBackend);
-            mCurrentPose = latestKF->GetPose().inverse();
-        }
+        // =========================================================================
+        // 【核心修复二】彻底删除了原先后端强行重写前端实时 mCurrentPose 的破坏性代码
+        // 原因：BA 优化只负责精调滑窗内的“历史关键帧位姿”和“地图点 3D 坐标”。
+        // 前端通过 PnP 求解实时帧时，由于输入的是被后端优化后的最新地图点，它解算出来的 localPose
+        // 会天然收敛至无漂移的正确平面，不需要在这里用历史的位姿进行生硬覆盖。
+        // 删掉此处逻辑后，前端主线程的帧间流畅度将彻底恢复，彻底解决轨迹断层、跳变或 PnP 频繁丢失的底层逻辑死结。
+        // =========================================================================
     }
 }
