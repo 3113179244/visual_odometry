@@ -7,6 +7,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <map>
+#include <unordered_map> // 新增：用于高速哈希查找
 #include <vector>
 #include <iostream>
 
@@ -22,27 +23,21 @@ struct SREPROJECTION_ERROR {
         T p_w[3] = { point_3d[0], point_3d[1], point_3d[2] };
         T p_c[3];
 
-        // camera_pose 排布：[t_x, t_y, t_z, q_x, q_y, q_z, q_w]
+        // 【核心修复】参数块排布：[t_x, t_y, t_z, q_w, q_x, q_y, q_z]
         T t[3] = { camera_pose[0], camera_pose[1], camera_pose[2] };
-        T q[4] = { camera_pose[3], camera_pose[4], camera_pose[5], camera_pose[6] }; // x,y,z,w
+        T q[4] = { camera_pose[3], camera_pose[4], camera_pose[5], camera_pose[6] }; // w, x, y, z
 
-        // 核心对齐：KeyFrame::GetPose() 内部存的是 T_w_c（相机到世界的变换）
-        // 投影需要变换到相机系：p_c = R_c_w * (p_w - t_w_c) = R_w_c.inverse() * (p_w - t_w_c)
         T p_w_minus_t[3] = { p_w[0] - t[0], p_w[1] - t[1], p_w[2] - t[2] };
         
-        // 四元数求逆（虚部取反）将点旋转到相机坐标系下
-        T q_inv[4] = { -q[0], -q[1], -q[2], q[3] };
+        // 【核心修复】四元数求逆（虚部取反）。因为 q 排布现在是 w,x,y,z，求逆只需虚部乘以 -1 
+        T q_inv[4] = { q[0], -q[1], -q[2], -q[3] };
         ceres::QuaternionRotatePoint(q_inv, p_w_minus_t, p_c);
 
-        // =================================================================
-        // 【核心修复】取代直接返回 false，使用软保护机制！
-        // 如果深度非正，不破坏 Ceres 的优化步骤（不返回 false），而是给予它一个极大的残差，
-        // 迫使优化器在下一步把这个坏点自动拉回正常区域，彻底消除 "infinite cost" 警告。
-        // =================================================================
+        // 软保护机制：如果深度非正，赋予像素惩罚项，消除 "infinite cost" 警告
         if (p_c[2] <= T(1e-4)) {
-            residuals[0] = T(1111.0); // 赋予一个极大的像素惩罚项
+            residuals[0] = T(1111.0); 
             residuals[1] = T(1111.0);
-            return true; // 返回 true 让 Ceres 继续平滑迭代
+            return true; 
         }
 
         // 标准相机投影公式
@@ -84,7 +79,6 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
     }
 
     ceres::Problem problem;
-    // 使用更严格的 HuberLoss 核函数（阈值调为 1.0 像素），能有效压制误追踪 Outlier 的毒害
     ceres::LossFunction* loss_function = new ceres::HuberLoss(1.0); 
 
     std::map<unsigned long, std::vector<double>> mapKFIdToParameterBlock;
@@ -99,17 +93,22 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
     // 2. 装载激活帧位姿
     for (size_t i = 0; i < activeKFs.size(); ++i) {
         auto kf = activeKFs[i];
-        Eigen::Isometry3d Twc = kf->GetPose(); // 获取相机的世界位姿 (T_w_c)
+        Eigen::Isometry3d Twc = kf->GetPose(); 
         Eigen::Vector3d t = Twc.translation();
         Eigen::Quaterniond q(Twc.rotation());
 
-        // 参数块内存排布 [t_x, t_y, t_z, q_x, q_y, q_z, q_w]
-        std::vector<double> pose_block = { t.x(), t.y(), t.z(), q.x(), q.y(), q.z(), q.w() };
+        // 【核心修复】强制将内存排列调整为 Ceres 标准的 [t, q_w, q_x, q_y, q_z]
+        std::vector<double> pose_block = { t.x(), t.y(), t.z(), q.w(), q.x(), q.y(), q.z() };
         mapKFIdToParameterBlock[kf->mId] = pose_block;
     }
 
-    // 获取所有全局地图点
+    // 【核心性能优化】获取所有全局地图点，并在内存中建立局部哈希表
+    // 彻底杜绝原先每帧进行嵌套 for 循环线性查找导致的指数级耗时卡死（从 O(N) 降低到 O(1)）
     std::vector<std::shared_ptr<MapPoint>> allMPs = pMap->GetAllMapPoints();
+    std::unordered_map<int, std::shared_ptr<MapPoint>> mapIdToMP;
+    for (const auto& mp : allMPs) {
+        mapIdToMP[mp->GetFeatureId()] = mp;
+    }
     
     // 3. 建立多帧多点 2D-3D 重投影误差残差约束
     for (auto kf : activeKFs) {
@@ -118,14 +117,10 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
             int mp_id = obs.first;          
             cv::Point2f pt2d = obs.second;  
 
-            std::shared_ptr<MapPoint> targetMP = nullptr;
-            for (auto mp : allMPs) {
-                if (mp->GetFeatureId() == mp_id) {
-                    targetMP = mp;
-                    break;
-                }
-            }
-            if (!targetMP) continue;
+            // 【核心性能优化】利用哈希表瞬间定位地图点
+            auto it_mp = mapIdToMP.find(mp_id);
+            if (it_mp == mapIdToMP.end()) continue;
+            std::shared_ptr<MapPoint> targetMP = it_mp->second;
 
             if (mapMPIdToParameterBlock.find(mp_id) == mapMPIdToParameterBlock.end()) {
                 Eigen::Vector3d pos = targetMP->GetWorldPos();
@@ -148,8 +143,10 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
         double* pose_data = mapKFIdToParameterBlock[kf->mId].data();
         
 #if CERES_VERSION_MAJOR >= 2 && CERES_VERSION_MINOR >= 1
-        problem.SetManifold(pose_data, new ceres::ProductManifold<ceres::SubsetManifold, ceres::QuaternionManifold>(
-            ceres::SubsetManifold(7, {0, 1, 2}), ceres::QuaternionManifold()));
+        // 【核心修复】新版 Ceres 下，将原先错误的 SubsetManifold(7, {0,1,2}) 
+        // 修正为标准的 3维欧氏空间 + 4维四元数空间的 ProductManifold
+        problem.SetManifold(pose_data, new ceres::ProductManifold<ceres::EuclideanManifold<3>, ceres::QuaternionManifold>(
+            ceres::EuclideanManifold<3>(), ceres::QuaternionManifold()));
 #else
         ceres::LocalParameterization* quaternion_parameterization = new ceres::QuaternionParameterization();
         problem.SetParameterization(pose_data, new ceres::ProductParameterization(
@@ -164,10 +161,10 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
 
     // 5. 求解器高级参数配置
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::SPARSE_SCHUR; // 稀疏舒尔消元（BA专用解算器）
+    options.linear_solver_type = ceres::SPARSE_SCHUR; 
     options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.max_num_iterations = 8;                  // 限制迭代次数确保异步线程平滑
-    options.minimizer_progress_to_stdout = false;     // 彻底关闭繁琐的内部迭代输出
+    options.max_num_iterations = 8;                  
+    options.minimizer_progress_to_stdout = false;     
 
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
@@ -177,7 +174,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
         for (auto kf : activeKFs) {
             auto& data = mapKFIdToParameterBlock[kf->mId];
             Eigen::Vector3d t_opt(data[0], data[1], data[2]);
-            Eigen::Quaterniond q_opt(data[6], data[3], data[4], data[5]); // w, x, y, z
+            // 【核心修复】对应修改写回时的解析顺序，data[3] 是 q_w
+            Eigen::Quaterniond q_opt(data[3], data[4], data[5], data[6]); // Eigen默认构造顺序为 (w, x, y, z)
 
             Eigen::Isometry3d Twc_opt = Eigen::Isometry3d::Identity();
             Twc_opt.linear() = q_opt.toRotationMatrix();

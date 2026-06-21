@@ -111,9 +111,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     if (imRight.channels() == 3)
         cv::cvtColor(imRight, grayRight, cv::COLOR_BGR2GRAY);
 
-    // =========================================================================
-    // 【核心修改】将左右目图像横向拼接组合成 VINS-Fusion 标配的双目拼接大图
-    // =========================================================================
+    // 将左右目图像横向拼接组合成双目拼接大图
     cv::Mat imgLeftBGR, imgRightBGR;
     cv::cvtColor(grayLeft, imgLeftBGR, cv::COLOR_GRAY2BGR);
     cv::cvtColor(grayRight, imgRightBGR, cv::COLOR_GRAY2BGR);
@@ -121,6 +119,13 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
     vWorldPoints.clear();
     vKFPositions.clear();
+
+    // 提取局部变量，锁保护临界区拷贝，彻底解决前后端多线程位姿践踏（Data Race）
+    Eigen::Isometry3d localPose;
+    {
+        std::unique_lock<std::mutex> lock(mMutexBackend);
+        localPose = mCurrentPose;
+    }
 
     // --- A. 第一帧系统初始化 ---
     if (!mIsInitialized)
@@ -130,7 +135,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         mpFeatureDetector->mvIds.clear();
         mpFeatureDetector->mvTrackCnt.clear();
         mmIDToMapPoint.clear();
-        mCurrentPose = Eigen::Isometry3d::Identity();
+        localPose = Eigen::Isometry3d::Identity();
 
         mpFeatureDetector->AddNewFeatures(grayLeft);
         mPrevImg = grayLeft.clone();
@@ -141,13 +146,12 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             initMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
         }
 
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, mCurrentPose.inverse(), initMeasurements);
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose.inverse(), initMeasurements);
         mpMap->AddKeyFrame(pKF);
 
         mvpPrevKFPointsMap = initMeasurements;
         mIsInitialized = true;
 
-        // 第一帧左图点同样使用红蓝色彩显示
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
             double len = std::min(1.0, 1.0 * mpFeatureDetector->mvTrackCnt[i] / 20.0);
@@ -155,9 +159,14 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             cv::circle(imgTrack, mpFeatureDetector->mvCurPts[i], 2, ptColor, 2);
         }
 
-        vKFPositions.push_back(mCurrentPose.inverse().translation());
+        vKFPositions.push_back(localPose.inverse().translation());
         mpFeatureDetector->UpdatePreviousStatus(grayLeft);
-        return mCurrentPose;
+
+        {
+            std::unique_lock<std::mutex> lock(mMutexBackend);
+            mCurrentPose = localPose;
+        }
+        return localPose;
     }
 
     // --- B. 正常帧间状态解算 ---
@@ -165,18 +174,25 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     mpFeatureDetector->TrackFeaturesLK(mPrevImg, grayLeft);
 
     // 步长 2：PnP 求解当前帧初估位姿
-    mpFeatureDetector->EstimatePosePnP(mmIDToMapPoint, mFx, mFy, mCx, mCy, mK1, mK2, mP1, mP2, mCurrentPose);
+    bool pnp_succ = mpFeatureDetector->EstimatePosePnP(mmIDToMapPoint, mFx, mFy, mCx, mCy, mK1, mK2, mP1, mP2, localPose);
 
     // 步长 3：均匀分布特征约束并补充提取新特征点
     mpFeatureDetector->SetMask(grayLeft.rows, grayLeft.cols);
     mpFeatureDetector->AddNewFeatures(grayLeft);
 
     // 步长 4：挑选并判定当前帧是否为关键帧
-    bool isKeyFrame = NeedNewKeyFrame();
+    // 【核心修复】如果 PnP 失败，说明当前位姿是不确定的历史脏位姿，绝不允许创建正常关键帧
+    bool isKeyFrame = false;
+    if (pnp_succ)
+    {
+        isKeyFrame = NeedNewKeyFrame();
+    }
 
-    // 步长 5：立体匹配与双目自适应深度三角化（右图特征点在此内部完成绿色渲染）
+    // 步长 5：立体匹配与双目自适应深度三角化
+    // 【核心修复】双目三角化必须在每一帧无条件执行！
+    // 只有这样，在冷启动第二帧 PnP 因地图为空而必然失败时，双目三角化才能强行把初始 3D 点计算出来，从而让第三帧解算步入正轨。
     mpFeatureDetector->TriangulateNewPoints(
-        grayLeft, grayRight, mCurrentPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
+        grayLeft, grayRight, localPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
         mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);
 
     // 步长 6：新关键帧固化并触发异步后端 BA 优化
@@ -188,7 +204,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             currentMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
         }
 
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, mCurrentPose.inverse(), currentMeasurements);
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose.inverse(), currentMeasurements);
         mpMap->AddKeyFrame(pKF);
 
         mvpPrevKFPointsMap = currentMeasurements;
@@ -210,6 +226,17 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         mCondBackend.notify_one();
     }
 
+    // 优化控制台打印：不再输出让人恐慌的无用警告，而是提供清晰的系统提示
+    if (!pnp_succ)
+    {
+        std::cout << ">>> [SLAM前端] 提示：PnP 暂无足够追踪点（如冷启动首帧或发生短暂遮挡），已通过双目实时三角化构建/恢复结构。" << std::endl;
+        // PnP失败时，直接把双目刚刚三角化出来的局部点传给可视化组件，防止 RViz 画面变空
+        for (const auto &pair : mmIDToMapPoint)
+        {
+            vWorldPoints.push_back(pair.second->GetWorldPos());
+        }
+    }
+
     // 获取全局轨迹供给可视化发布
     auto allKFs = mpMap->GetAllKeyFrames();
     for (const auto &kf : allKFs)
@@ -220,9 +247,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     std::cout << "[SLAM地图管理] 全局关键帧总数: " << allKFs.size()
               << " | 全局地图固化路标点数: " << mpMap->GetMapPointsSize() << std::endl;
 
-    // =========================================================================
-    // 【核心修改】红蓝渐变渲染左图的追踪特征点
-    // =========================================================================
+    // 红蓝渐变渲染左图的追踪特征点
     for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); i++)
     {
         double len = std::min(1.0, 1.0 * mpFeatureDetector->mvTrackCnt[i] / 20.0);
@@ -232,7 +257,13 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
     mPrevImg = grayLeft.clone();
     mpFeatureDetector->UpdatePreviousStatus(grayLeft);
-    return mCurrentPose;
+
+    // 临界区锁保护，安全更新并刷回全局缓冲变量
+    {
+        std::unique_lock<std::mutex> lock(mMutexBackend);
+        mCurrentPose = localPose;
+    }
+    return localPose;
 }
 
 bool Tracking::NeedNewKeyFrame()
@@ -281,6 +312,7 @@ void Tracking::BackendLoop()
         if (!allKFs.empty())
         {
             auto latestKF = allKFs.back();
+            std::unique_lock<std::mutex> lock(mMutexBackend);
             mCurrentPose = latestKF->GetPose().inverse();
         }
     }
