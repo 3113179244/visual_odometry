@@ -12,7 +12,7 @@
 #include <thread>
 #include <condition_variable>
 #include <functional>
-
+#include "TrajectoryWriter.h"
 class Map;
 class MapPoint;
 class FeatureDetector;
@@ -54,7 +54,7 @@ private:
 private:
     bool mIsInitialized;
     cv::Mat mPrevImg;
-
+    TrajectoryWriter mTrajectoryWriter;
     // 核心解耦组件
     std::unique_ptr<FeatureDetector> mpFeatureDetector;
     std::shared_ptr<Map> mpMap;                              
