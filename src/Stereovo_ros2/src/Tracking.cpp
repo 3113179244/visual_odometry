@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <Eigen/Dense>
 #include <opencv2/core/eigen.hpp>
-
+#include "Optimizer.h"
 Tracking::Tracking(std::shared_ptr<Map> pMap)
     : mIsInitialized(false), mNextId(0), mpMap(pMap), mNextKFId(0), mIsRunning(true)
 {
@@ -16,20 +16,20 @@ Tracking::Tracking(std::shared_ptr<Map> pMap)
     // =========================================================
     // 【方案一核心修改】在启动独立常驻线程之前，对全局静态参数做一次性深拷贝
     // =========================================================
-    mFlowBack         = (Parameters::FLOW_BACK != 0);
-    mFx               = Parameters::fx;
-    mFy               = Parameters::fy;
-    mCx               = Parameters::cx;
-    mCy               = Parameters::cy;
-    mK1               = Parameters::k1;
-    mK2               = Parameters::k2;
-    mP1               = Parameters::p1;
-    mP2               = Parameters::p2;
+    mFlowBack = (Parameters::FLOW_BACK != 0);
+    mFx = Parameters::fx;
+    mFy = Parameters::fy;
+    mCx = Parameters::cx;
+    mCy = Parameters::cy;
+    mK1 = Parameters::k1;
+    mK2 = Parameters::k2;
+    mP1 = Parameters::p1;
+    mP2 = Parameters::p2;
     mKeyframeParallax = Parameters::KEYFRAME_PARALLAX;
-    mMaxCnt           = Parameters::MAX_CNT;
-    mMinDist          = Parameters::MIN_DIST;
-    mBodyTCam0        = Parameters::body_T_cam0;
-    mBodyTCam1        = Parameters::body_T_cam1;
+    mMaxCnt = Parameters::MAX_CNT;
+    mMinDist = Parameters::MIN_DIST;
+    mBodyTCam0 = Parameters::body_T_cam0;
+    mBodyTCam1 = Parameters::body_T_cam1;
     // =========================================================
 
     mTrackThread = std::thread(&Tracking::TrackLoop, this);
@@ -132,7 +132,15 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         for (size_t i = 0; i < mvCurPts.size(); ++i)
             mInversePrevPtsMap[mvIds[i]] = mvCurPts[i];
 
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, mCurrentPose.inverse());
+        // 【第一步修改】打包第一帧的所有 2D 特征观测数据 (ID -> 像素坐标)
+        std::map<int, cv::Point2f> initMeasurements;
+        for (size_t i = 0; i < mvCurPts.size(); ++i)
+        {
+            initMeasurements[mvIds[i]] = mvCurPts[i];
+        }
+
+        // 【第一步修改】创建初始关键帧时传入特征观测数据
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, mCurrentPose.inverse(), initMeasurements);
         mpMap->AddKeyFrame(pKF);
 
         mvpPrevKFPointsMap.clear();
@@ -157,7 +165,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         std::vector<float> err;
         cv::calcOpticalFlowPyrLK(mPrevImg, grayLeft, mvPrevPts, currPts, status, err, cv::Size(21, 21), 3);
 
-        // 【修改】使用本地安全缓存变量 mFlowBack
         if (mFlowBack)
         {
             std::vector<cv::Point2f> reversePts = mvPrevPts;
@@ -216,7 +223,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
         if (objectPoints.size() >= 5)
         {
-            // 【修改】利用固化好的内参矩阵与畸变参数，避免读取静态 Parameters 产生 Data Race
             cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << mFx, 0, mCx, 0, mFy, mCy, 0, 0, 1);
             cv::Mat distCoeffs = (cv::Mat_<double>(4, 1) << mK1, mK2, mP1, mP2);
             cv::Mat rvec, tvec;
@@ -287,7 +293,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
         Eigen::Matrix4d T_w_body = mCurrentPose.inverse().matrix();
         
-        // 【修改】使用本地缓存的外参矩阵 mBodyTCam
         Eigen::Matrix4d T_w_c0 = T_w_body * mBodyTCam0;
         Eigen::Matrix4d T_w_c1 = T_w_body * mBodyTCam1;
 
@@ -301,7 +306,9 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
                     Eigen::Vector3d P_w;
                     if (TriangulateStereo(mvCurPts[i], mvRightPts[i], T_w_c0, T_w_c1, P_w))
                     {
-                        auto pMP = std::make_shared<MapPoint>(P_w);
+                        // 【第四步修改】传入当前特征点的全局 ID：mvIds[i]
+                        auto pMP = std::make_shared<MapPoint>(P_w, mvIds[i]);
+                        
                         mmIDToMapPoint[mvIds[i]] = pMP;
                         if (isKeyFrame)
                         {
@@ -322,7 +329,15 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     // 7. 固化关键帧数据
     if (isKeyFrame)
     {
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, mCurrentPose.inverse());
+        // 【第一步修改】打包当前关键帧的所有 2D 特征观测数据
+        std::map<int, cv::Point2f> currentMeasurements;
+        for (size_t i = 0; i < mvCurPts.size(); ++i)
+        {
+            currentMeasurements[mvIds[i]] = mvCurPts[i];
+        }
+
+        // 【第一步修改】创建新关键帧时完整传入观测集合
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, mCurrentPose.inverse(), currentMeasurements);
         mpMap->AddKeyFrame(pKF);
 
         mvpPrevKFPointsMap.clear();
@@ -339,6 +354,11 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
                 mpMap->AddMapPoint(it->second);
             }
         }
+        // std::cout << ">>> [后端优化] 触发 10 帧滑动窗口局部 BA 优化..." << std::endl;
+        // Optimizer::LocalBundleAdjustment(mpMap, 10);
+
+        // // 优化完成后，更新当前帧在前端的位姿缓存，确保下一次 PnP 和光流基于最新的精准位姿继续运行
+        // mCurrentPose = pKF->GetPose().inverse();
     }
 
     // 提取全局所有关键帧的 3D 世界位置提供给外部组件
@@ -391,7 +411,7 @@ bool Tracking::NeedNewKeyFrame()
     if (common_tracked_pts_cnt == 0)
         return true;
     double average_parallax = total_parallax / common_tracked_pts_cnt;
-    
+
     // 【修改】使用本地缓存参数 mKeyframeParallax
     return average_parallax >= mKeyframeParallax;
 }
@@ -457,7 +477,7 @@ void Tracking::SetMask(const cv::Mat &img)
             mvCurPts.push_back(pt);
             mvIds.push_back(it.second.second);
             mvTrackCnt.push_back(it.first);
-            
+
             // 【修改】使用局部缓存的最小特征距离参数 mMinDist
             cv::circle(mMask, pt, mMinDist, 0, -1);
         }
@@ -471,7 +491,7 @@ void Tracking::AddNewFeatures(const cv::Mat &img)
     if (countToDetect > 0)
     {
         std::vector<cv::Point2f> nPts;
-        
+
         // 【修改】使用本地安全缓存变量 mMinDist
         cv::goodFeaturesToTrack(img, nPts, countToDetect, 0.01, mMinDist, mMask);
         for (const auto &pt : nPts)
