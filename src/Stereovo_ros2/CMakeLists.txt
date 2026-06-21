@@ -114,6 +114,7 @@ install(TARGETS Stereovo_node ${PROJECT_NAME}_lib
 install(DIRECTORY
   launch
   config
+  rviz2
   DESTINATION share/${PROJECT_NAME}
 )
 

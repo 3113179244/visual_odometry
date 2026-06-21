@@ -7,49 +7,84 @@
 #include <memory>
 #include <vector>
 #include <map>
+#include <queue>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <functional>
+
+// 前向声明 SLAM 核心组件
+class Map;
+class MapPoint;
+class KeyFrame;
 
 class Tracking {
 public:
-    Tracking();
-    ~Tracking() = default;
+    // 回调函数类型：时间戳, 渲染后的特征图, 三角化出的3D世界点云, 当前帧位姿Tcw
+    using RenderCallback = std::function<void(double, const cv::Mat&, const std::vector<Eigen::Vector3d>&, const Eigen::Isometry3d&)>;
 
-    // 核心主入口：接收左右目图像、时间戳，传出可视化画布，以及三角化计算出的 3D 世界空间点云
-    Eigen::Isometry3d GrabImageStereo(const cv::Mat& imLeft, const cv::Mat& imRight, 
-                                      const double &timestamp, cv::Mat& imgTrack,
-                                      std::vector<Eigen::Vector3d>& vWorldPoints);
+    // 构造函数传入全局地图组件指针，实现数据固化持久化
+    Tracking(std::shared_ptr<Map> pMap);
+    ~Tracking();
+
+    // 注册发布回调函数
+    void RegisterCallback(RenderCallback cb);
+
+    // 供外部 ROS2 节点快速无阻碍塞入图像接口
+    void FeedStereoImages(const cv::Mat& imLeft, const cv::Mat& imRight, double timestamp);
 
 private:
-    // VINS风格核心：设置均匀化掩膜并对老特征点进行非极大值抑制（NMS）操作
+    // Tracking 内部常驻处理线程循环
+    void TrackLoop();
+
+    // 核心光流追踪与解算业务逻辑（包含 PnP、关键帧筛选与地图点长期关联）
+    Eigen::Isometry3d ProcessStereo(const cv::Mat& imLeft, const cv::Mat& imRight, 
+                                    const double &timestamp, cv::Mat& imgTrack,
+                                    std::vector<Eigen::Vector3d>& vWorldPoints);
+
+    // 判定当前帧是否应该被筛选为关键帧
+    bool NeedNewKeyFrame();
+
     void SetMask(const cv::Mat& img);
-
-    // VINS风格核心：补充提取新特征点并分配全局唯一ID
     void AddNewFeatures(const cv::Mat& img);
-
-    // 几何核心：使用 DLT 算法和 SVD 奇异值分解对单个双目特征点进行三角化深度计算
     bool TriangulateStereo(const cv::Point2f& ptLeft, const cv::Point2f& ptRight, 
                            const Eigen::Matrix4d& T_w_c0, const Eigen::Matrix4d& T_w_c1, 
                            Eigen::Vector3d& P_w);
-
-    // 辅助工具：检查特征点是否在图像边界内
     bool InBorder(const cv::Point2f &pt, int cols, int rows);
-
-    // 辅助工具：计算两点之间的欧式距离
     double Distance(const cv::Point2f &pt1, const cv::Point2f &pt2);
 
 private:
-    bool mIsInitialized;                // 系统是否初始化成功
-    cv::Mat mPrevImg;                   // 上一帧的左目灰度图像
+    bool mIsInitialized;                
+    cv::Mat mPrevImg;                   
     
-    // VINS-Fusion 风格前端维护的数据容器
-    std::vector<cv::Point2f> mvCurPts;   // 当前帧左目图像中的特征像素坐标
-    std::vector<cv::Point2f> mvPrevPts;  // 上一帧左目图像中的特征像素坐标
-    std::vector<int> mvIds;              // 每个特征点对应的全局唯一 ID
-    std::vector<int> mvTrackCnt;         // 每个特征点被成功追踪的次数（寿命）
-    
-    std::map<int, cv::Point2f> mInversePrevPtsMap; // 轨迹画图映射
+    // 特征容器
+    std::vector<cv::Point2f> mvCurPts;   
+    std::vector<cv::Point2f> mvPrevPts;  
+    std::vector<int> mvIds;              
+    std::vector<int> mvTrackCnt;         
+    std::map<int, cv::Point2f> mInversePrevPtsMap; 
+    cv::Mat mMask;                       
+    int mNextId;                         
 
-    cv::Mat mMask;                       // 均匀化均衡掩膜
-    int mNextId;                         // 全局特征点 ID 累加计数器
+    // --- 关键帧与全局地图点管理的核心数据结构 ---
+    std::shared_ptr<Map> mpMap;                               // 全局地图指针
+    std::map<int, std::shared_ptr<MapPoint>> mmIDToMapPoint;  // 维护全局唯一的 特征点ID 到 地图点智能指针 的寿命映射
+    
+    std::map<int, cv::Point2f> mvpPrevKFPointsMap;            // 记录【上一个关键帧】中所有特征点的2D像素坐标（用于计算平均视差）
+    unsigned long mNextKFId;                                  // 关键帧 ID 累加计数器
+    Eigen::Isometry3d mCurrentPose;                           // 当前帧的位姿 Tcw
+
+    // 线程安全与异步队列相关
+    std::thread mTrackThread;               
+    bool mIsRunning;                        
+    std::mutex mMutexBuf;                   
+    std::condition_variable mCondBuf;       
+    
+    std::queue<cv::Mat> mLeftBuf;
+    std::queue<cv::Mat> mRightBuf;
+    std::queue<double> mTimeBuf;
+
+    RenderCallback mRenderCb;               
 };
 
 #endif // TRACKING_H
