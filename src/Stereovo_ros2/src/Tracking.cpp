@@ -3,517 +3,137 @@
 #include "Map.h"
 #include "MapPoint.h"
 #include "KeyFrame.h"
+#include "FeatureDetector.h"
 #include <iostream>
-#include <algorithm>
-#include <Eigen/Dense>
-#include <opencv2/core/eigen.hpp>
-#include "Optimizer.h"
+
 Tracking::Tracking(std::shared_ptr<Map> pMap)
-    : mIsInitialized(false), mNextId(0), mpMap(pMap), mNextKFId(0), mIsRunning(true)
-{
+    : mIsInitialized(false), mpMap(pMap), mNextKFId(0), mIsRunning(true) {
     mCurrentPose = Eigen::Isometry3d::Identity();
-
-    // =========================================================
-    // 【方案一核心修改】在启动独立常驻线程之前，对全局静态参数做一次性深拷贝
-    // =========================================================
-    mFlowBack = (Parameters::FLOW_BACK != 0);
-    mFx = Parameters::fx;
-    mFy = Parameters::fy;
-    mCx = Parameters::cx;
-    mCy = Parameters::cy;
-    mK1 = Parameters::k1;
-    mK2 = Parameters::k2;
-    mP1 = Parameters::p1;
-    mP2 = Parameters::p2;
+    mFx = Parameters::fx; mFy = Parameters::fy; mCx = Parameters::cx; mCy = Parameters::cy;
+    mK1 = Parameters::k1; mK2 = Parameters::k2; mP1 = Parameters::p1; mP2 = Parameters::p2;
     mKeyframeParallax = Parameters::KEYFRAME_PARALLAX;
-    mMaxCnt = Parameters::MAX_CNT;
-    mMinDist = Parameters::MIN_DIST;
-    mBodyTCam0 = Parameters::body_T_cam0;
-    mBodyTCam1 = Parameters::body_T_cam1;
-    // =========================================================
+    mBodyTCam0 = Parameters::body_T_cam0; mBodyTCam1 = Parameters::body_T_cam1;
 
+    // 构造独立的特征管理器
+    mpFeatureDetector = std::make_unique<FeatureDetector>(Parameters::MAX_CNT, Parameters::MIN_DIST, Parameters::FLOW_BACK != 0);
     mTrackThread = std::thread(&Tracking::TrackLoop, this);
 }
 
-Tracking::~Tracking()
-{
-    {
-        std::unique_lock<std::mutex> lock(mMutexBuf);
-        mIsRunning = false;
-    }
-    mCondBuf.notify_all();
-    if (mTrackThread.joinable())
-    {
-        mTrackThread.join();
-    }
+Tracking::~Tracking() {
+    { std::unique_lock<std::mutex> lock(mMutexBuf); mIsRunning = false; }
+    mCondBuf.notify_all(); if (mTrackThread.joinable()) mTrackThread.join();
 }
 
-void Tracking::RegisterCallback(RenderCallback cb)
-{
-    mRenderCb = cb;
-}
+void Tracking::RegisterCallback(RenderCallback cb) { mRenderCb = cb; }
 
-void Tracking::FeedStereoImages(const cv::Mat &imLeft, const cv::Mat &imRight, double timestamp)
-{
+void Tracking::FeedStereoImages(const cv::Mat &imLeft, const cv::Mat &imRight, double timestamp) {
     std::unique_lock<std::mutex> lock(mMutexBuf);
-    mLeftBuf.push(imLeft.clone());
-    mRightBuf.push(imRight.clone());
-    mTimeBuf.push(timestamp);
+    mLeftBuf.push(imLeft.clone()); mRightBuf.push(imRight.clone()); mTimeBuf.push(timestamp);
     mCondBuf.notify_one();
 }
 
-void Tracking::TrackLoop()
-{
-    while (true)
-    {
-        cv::Mat matLeft, matRight;
-        double timestamp = 0.0;
-
+void Tracking::TrackLoop() {
+    while (true) {
+        cv::Mat matLeft, matRight; double timestamp = 0.0;
         {
             std::unique_lock<std::mutex> lock(mMutexBuf);
-            mCondBuf.wait(lock, [this]()
-                          { return !mIsRunning || (!mLeftBuf.empty() && !mRightBuf.empty() && !mTimeBuf.empty()); });
-
-            if (!mIsRunning)
-                break;
-
-            matLeft = mLeftBuf.front();
-            mLeftBuf.pop();
-            matRight = mRightBuf.front();
-            mRightBuf.pop();
-            timestamp = mTimeBuf.front();
-            mTimeBuf.pop();
+            mCondBuf.wait(lock, [this](){ return !mIsRunning || (!mLeftBuf.empty() && !mRightBuf.empty() && !mTimeBuf.empty()); });
+            if (!mIsRunning) break;
+            matLeft = mLeftBuf.front(); mLeftBuf.pop(); matRight = mRightBuf.front(); mRightBuf.pop(); timestamp = mTimeBuf.front(); mTimeBuf.pop();
         }
-
-        cv::Mat feat_img;
-        std::vector<Eigen::Vector3d> vWorldPoints;
-        std::vector<Eigen::Vector3d> vKFPositions;
-
+        cv::Mat feat_img; std::vector<Eigen::Vector3d> vWorldPoints; std::vector<Eigen::Vector3d> vKFPositions;
         Eigen::Isometry3d Tcw = ProcessStereo(matLeft, matRight, timestamp, feat_img, vWorldPoints, vKFPositions);
-
-        if (mRenderCb && !feat_img.empty())
-        {
-            mRenderCb(timestamp, feat_img, vWorldPoints, vKFPositions, Tcw, mvCurPts, mvIds);
-        }
+        if (mRenderCb && !feat_img.empty()) mRenderCb(timestamp, feat_img, vWorldPoints, vKFPositions, Tcw, mpFeatureDetector->mvCurPts, mpFeatureDetector->mvIds);
     }
 }
 
-Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &imRight,
-                                          const double &timestamp, cv::Mat &imgTrack,
-                                          std::vector<Eigen::Vector3d> &vWorldPoints,
-                                          std::vector<Eigen::Vector3d> &vKFPositions)
-{
-    cv::Mat grayLeft = imLeft;
-    if (imLeft.channels() == 3)
-        cv::cvtColor(imLeft, grayLeft, cv::COLOR_BGR2GRAY);
-    cv::Mat grayRight = imRight;
-    if (imRight.channels() == 3)
-        cv::cvtColor(imRight, grayRight, cv::COLOR_BGR2GRAY);
+Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, cv::Mat &imgTrack, std::vector<Eigen::Vector3d> &vWorldPoints, std::vector<Eigen::Vector3d> &vKFPositions) {
+    cv::Mat grayLeft = imLeft; if (imLeft.channels() == 3) cv::cvtColor(imLeft, grayLeft, cv::COLOR_BGR2GRAY);
+    cv::Mat grayRight = imRight; if (imRight.channels() == 3) cv::cvtColor(imRight, grayRight, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(grayLeft, imgTrack, cv::COLOR_GRAY2BGR); vWorldPoints.clear(); vKFPositions.clear();
 
-    cv::cvtColor(grayLeft, imgTrack, cv::COLOR_GRAY2BGR);
-    vWorldPoints.clear();
-    vKFPositions.clear();
-
-    // 第一帧初始化
-    if (!mIsInitialized)
-    {
+    // 1. 第一帧初始化
+    if (!mIsInitialized) {
         std::cout << ">>> [SLAM前端] 第一帧初始化，固化为初始关键帧。" << std::endl;
-        mvCurPts.clear();
-        mvIds.clear();
-        mvTrackCnt.clear();
-        mmIDToMapPoint.clear();
-        mCurrentPose = Eigen::Isometry3d::Identity();
-
-        AddNewFeatures(grayLeft);
-
+        mmIDToMapPoint.clear(); mCurrentPose = Eigen::Isometry3d::Identity();
+        mpFeatureDetector->mvCurPts.clear(); mpFeatureDetector->mvIds.clear(); mpFeatureDetector->mvTrackCnt.clear();
+        
+        mpFeatureDetector->AddNewFeatures(grayLeft);
         mPrevImg = grayLeft.clone();
-        mvPrevPts = mvCurPts;
-        mInversePrevPtsMap.clear();
-        for (size_t i = 0; i < mvCurPts.size(); ++i)
-            mInversePrevPtsMap[mvIds[i]] = mvCurPts[i];
-
-        // 【第一步修改】打包第一帧的所有 2D 特征观测数据 (ID -> 像素坐标)
+        
         std::map<int, cv::Point2f> initMeasurements;
-        for (size_t i = 0; i < mvCurPts.size(); ++i)
-        {
-            initMeasurements[mvIds[i]] = mvCurPts[i];
-        }
-
-        // 【第一步修改】创建初始关键帧时传入特征观测数据
+        for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i) initMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
         auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, mCurrentPose.inverse(), initMeasurements);
         mpMap->AddKeyFrame(pKF);
 
-        mvpPrevKFPointsMap.clear();
-        for (size_t i = 0; i < mvCurPts.size(); ++i)
-        {
-            mvpPrevKFPointsMap[mvIds[i]] = mvCurPts[i];
-        }
-
+        mvpPrevKFPointsMap = initMeasurements;
         mIsInitialized = true;
-        for (const auto &pt : mvCurPts)
-            cv::circle(imgTrack, pt, 2, cv::Scalar(0, 0, 255), 2);
-
+        
+        for (const auto &pt : mpFeatureDetector->mvCurPts) cv::circle(imgTrack, pt, 2, cv::Scalar(0, 0, 255), 2);
         vKFPositions.push_back(mCurrentPose.inverse().translation());
+        mpFeatureDetector->UpdatePreviousStatus(grayLeft);
         return mCurrentPose;
     }
 
-    // 执行图像帧间 LK 光流追踪与正反向校验
-    if (!mvPrevPts.empty())
-    {
-        std::vector<cv::Point2f> currPts;
-        std::vector<uchar> status;
-        std::vector<float> err;
-        cv::calcOpticalFlowPyrLK(mPrevImg, grayLeft, mvPrevPts, currPts, status, err, cv::Size(21, 21), 3);
+    // 2. 光流帧间追踪 
+    mpFeatureDetector->TrackFeaturesLK(mPrevImg, grayLeft);
 
-        if (mFlowBack)
-        {
-            std::vector<cv::Point2f> reversePts = mvPrevPts;
-            std::vector<uchar> reverseStatus;
-            cv::calcOpticalFlowPyrLK(grayLeft, mPrevImg, currPts, reversePts, reverseStatus, err, cv::Size(21, 21), 3);
-            for (size_t i = 0; i < status.size(); i++)
-            {
-                if (status[i] && reverseStatus[i])
-                {
-                    if (Distance(mvPrevPts[i], reversePts[i]) > 0.5)
-                        status[i] = 0;
-                }
-                else
-                    status[i] = 0;
-            }
-        }
+    // 3. PnP 求解当前帧 Pose
+    mpFeatureDetector->EstimatePosePnP(mmIDToMapPoint, mFx, mFy, mCx, mCy, mK1, mK2, mP1, mP2, mCurrentPose);
 
-        mvCurPts.clear();
-        std::vector<int> keepIds;
-        std::vector<int> keepTrackCnt;
-        for (size_t i = 0; i < status.size(); i++)
-        {
-            if (status[i] && InBorder(currPts[i], grayLeft.cols, grayLeft.rows))
-            {
-                mvCurPts.push_back(currPts[i]);
-                keepIds.push_back(mvIds[i]);
-                keepTrackCnt.push_back(mvTrackCnt[i]);
-            }
-        }
-        mvIds = keepIds;
-        mvTrackCnt = keepTrackCnt;
-    }
+    // 4. 自适应 Mask 补盲提取新特征点
+    mpFeatureDetector->SetMask(grayLeft.rows, grayLeft.cols);
+    mpFeatureDetector->AddNewFeatures(grayLeft);
 
-    for (auto &n : mvTrackCnt)
-        n++;
-
-    // 3. PnP 位姿解算
-    if (mIsInitialized && !mvCurPts.empty())
-    {
-        std::vector<cv::Point3f> objectPoints;
-        std::vector<cv::Point2f> imagePoints;
-        std::vector<int> pnpFeatureIndices;
-
-        for (size_t i = 0; i < mvCurPts.size(); ++i)
-        {
-            int id = mvIds[i];
-            auto it = mmIDToMapPoint.find(id);
-            if (it != mmIDToMapPoint.end())
-            {
-                Eigen::Vector3d pos = it->second->GetWorldPos();
-                objectPoints.push_back(cv::Point3f(pos.x(), pos.y(), pos.z()));
-                imagePoints.push_back(mvCurPts[i]);
-                pnpFeatureIndices.push_back(i);
-            }
-        }
-
-        if (objectPoints.size() >= 5)
-        {
-            cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << mFx, 0, mCx, 0, mFy, mCy, 0, 0, 1);
-            cv::Mat distCoeffs = (cv::Mat_<double>(4, 1) << mK1, mK2, mP1, mP2);
-            cv::Mat rvec, tvec;
-            std::vector<int> inliers;
-
-            bool pnp_succ = cv::solvePnPRansac(objectPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, 100, 8.0, 0.99, inliers, cv::SOLVEPNP_ITERATIVE);
-
-            if (pnp_succ && inliers.size() >= 4)
-            {
-                cv::Mat R;
-                cv::Rodrigues(rvec, R);
-                Eigen::Matrix3d eigen_R;
-                Eigen::Vector3d eigen_t;
-                cv::cv2eigen(R, eigen_R);
-                cv::cv2eigen(tvec, eigen_t);
-
-                mCurrentPose.linear() = eigen_R;
-                mCurrentPose.translation() = eigen_t;
-
-                std::vector<bool> isInlier(mvCurPts.size(), true);
-                for (size_t k = 0; k < pnpFeatureIndices.size(); ++k)
-                    isInlier[pnpFeatureIndices[k]] = false;
-                for (int idx : inliers)
-                    isInlier[pnpFeatureIndices[idx]] = true;
-
-                std::vector<cv::Point2f> compressedPts;
-                std::vector<int> compressedIds;
-                std::vector<int> compressedTrackCnt;
-                for (size_t k = 0; k < mvCurPts.size(); ++k)
-                {
-                    if (isInlier[k])
-                    {
-                        compressedPts.push_back(mvCurPts[k]);
-                        compressedIds.push_back(mvIds[k]);
-                        compressedTrackCnt.push_back(mvTrackCnt[k]);
-
-                        auto it_mp = mmIDToMapPoint.find(mvIds[k]);
-                        if (it_mp != mmIDToMapPoint.end())
-                        {
-                            it_mp->second->AddObservation();
-                        }
-                    }
-                    else
-                    {
-                        mmIDToMapPoint.erase(mvIds[k]);
-                    }
-                }
-                mvCurPts = compressedPts;
-                mvIds = compressedIds;
-                mvTrackCnt = compressedTrackCnt;
-            }
-        }
-    }
-
-    SetMask(grayLeft);
-    AddNewFeatures(grayLeft);
-
-    // 5. 判定是否为关键帧
     bool isKeyFrame = NeedNewKeyFrame();
 
-    // 6. 执行双目匹配与自适应三角化
-    if (!mvCurPts.empty() && !grayRight.empty())
-    {
-        std::vector<cv::Point2f> mvRightPts;
-        std::vector<uchar> stereoStatus;
-        std::vector<float> stereoErr;
-        cv::calcOpticalFlowPyrLK(grayLeft, grayRight, mvCurPts, mvRightPts, stereoStatus, stereoErr, cv::Size(21, 21), 3);
+    // 5. 传递给提取器完成双目立体匹配和三角化
+    mpFeatureDetector->TriangulateNewPoints(grayLeft, grayRight, mCurrentPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy, mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);
 
-        Eigen::Matrix4d T_w_body = mCurrentPose.inverse().matrix();
-        
-        Eigen::Matrix4d T_w_c0 = T_w_body * mBodyTCam0;
-        Eigen::Matrix4d T_w_c1 = T_w_body * mBodyTCam1;
-
-        for (size_t i = 0; i < mvCurPts.size(); i++)
-        {
-            if (stereoStatus[i] && InBorder(mvRightPts[i], grayRight.cols, grayRight.rows))
-            {
-                auto it = mmIDToMapPoint.find(mvIds[i]);
-                if (it == mmIDToMapPoint.end())
-                {
-                    Eigen::Vector3d P_w;
-                    if (TriangulateStereo(mvCurPts[i], mvRightPts[i], T_w_c0, T_w_c1, P_w))
-                    {
-                        // 【第四步修改】传入当前特征点的全局 ID：mvIds[i]
-                        auto pMP = std::make_shared<MapPoint>(P_w, mvIds[i]);
-                        
-                        mmIDToMapPoint[mvIds[i]] = pMP;
-                        if (isKeyFrame)
-                        {
-                            mpMap->AddMapPoint(pMP);
-                        }
-                        vWorldPoints.push_back(P_w);
-                        cv::circle(imgTrack, mvCurPts[i], 4, cv::Scalar(255, 255, 0), 1);
-                    }
-                }
-                else
-                {
-                    vWorldPoints.push_back(it->second->GetWorldPos());
-                }
-            }
-        }
-    }
-
-    // 7. 固化关键帧数据
-    if (isKeyFrame)
-    {
-        // 【第一步修改】打包当前关键帧的所有 2D 特征观测数据
+    // 6. 固化关键帧数据库
+    if (isKeyFrame) {
         std::map<int, cv::Point2f> currentMeasurements;
-        for (size_t i = 0; i < mvCurPts.size(); ++i)
-        {
-            currentMeasurements[mvIds[i]] = mvCurPts[i];
-        }
-
-        // 【第一步修改】创建新关键帧时完整传入观测集合
+        for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i) currentMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
         auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, mCurrentPose.inverse(), currentMeasurements);
         mpMap->AddKeyFrame(pKF);
 
-        mvpPrevKFPointsMap.clear();
-        for (size_t i = 0; i < mvCurPts.size(); ++i)
-        {
-            mvpPrevKFPointsMap[mvIds[i]] = mvCurPts[i];
-        }
-
-        for (const auto &id : mvIds)
-        {
+        mvpPrevKFPointsMap = currentMeasurements;
+        for (const auto &id : mpFeatureDetector->mvIds) {
             auto it = mmIDToMapPoint.find(id);
-            if (it != mmIDToMapPoint.end())
-            {
-                mpMap->AddMapPoint(it->second);
-            }
+            if (it != mmIDToMapPoint.end()) mpMap->AddMapPoint(it->second);
         }
-        // std::cout << ">>> [后端优化] 触发 10 帧滑动窗口局部 BA 优化..." << std::endl;
-        // Optimizer::LocalBundleAdjustment(mpMap, 10);
-
-        // // 优化完成后，更新当前帧在前端的位姿缓存，确保下一次 PnP 和光流基于最新的精准位姿继续运行
-        // mCurrentPose = pKF->GetPose().inverse();
     }
 
-    // 提取全局所有关键帧的 3D 世界位置提供给外部组件
     auto allKFs = mpMap->GetAllKeyFrames();
-    for (const auto &kf : allKFs)
-    {
-        vKFPositions.push_back(kf->GetPose().translation());
-    }
+    for (const auto &kf : allKFs) vKFPositions.push_back(kf->GetPose().translation());
+    std::cout << "[SLAM地图管理] 全局关键帧总数: " << allKFs.size() << " | 全局地图路标点数: " << mpMap->GetMapPointsSize() << std::endl;
 
-    std::cout << "[SLAM地图管理] 全局关键帧总数: " << allKFs.size()
-              << " | 全局地图固化路标点数: " << mpMap->GetMapPointsSize() << std::endl;
-
-    // 绘制轨迹
-    for (size_t i = 0; i < mvCurPts.size(); i++)
-    {
-        double len = std::min(1.0, 1.0 * mvTrackCnt[i] / 20.0);
-        cv::Scalar ptColor = cv::Scalar(255 * (1 - len), 0, 255 * len);
-        cv::circle(imgTrack, mvCurPts[i], 2, ptColor, 2);
-        auto it = mInversePrevPtsMap.find(mvIds[i]);
-        if (it != mInversePrevPtsMap.end())
-            cv::arrowedLine(imgTrack, it->second, mvCurPts[i], cv::Scalar(0, 255, 0), 1, 8, 0, 0.2);
+    // 7. 画特征轨迹并更新状态缓存
+    for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); i++) {
+        double len = std::min(1.0, 1.0 * mpFeatureDetector->mvTrackCnt[i] / 20.0);
+        cv::circle(imgTrack, mpFeatureDetector->mvCurPts[i], 2, cv::Scalar(255 * (1 - len), 0, 255 * len), 2);
+        auto it = mpFeatureDetector->mInversePrevPtsMap.find(mpFeatureDetector->mvIds[i]);
+        if (it != mpFeatureDetector->mInversePrevPtsMap.end()) cv::arrowedLine(imgTrack, it->second, mpFeatureDetector->mvCurPts[i], cv::Scalar(0, 255, 0), 1, 8, 0, 0.2);
     }
 
     mPrevImg = grayLeft.clone();
-    mvPrevPts = mvCurPts;
-    mInversePrevPtsMap.clear();
-    for (size_t i = 0; i < mvCurPts.size(); i++)
-        mInversePrevPtsMap[mvIds[i]] = mvCurPts[i];
-
+    mpFeatureDetector->UpdatePreviousStatus(grayLeft);
     return mCurrentPose;
 }
 
-bool Tracking::NeedNewKeyFrame()
-{
-    if (mvCurPts.size() < 20)
-        return true;
-    double total_parallax = 0.0;
-    int common_tracked_pts_cnt = 0;
-
-    for (size_t i = 0; i < mvCurPts.size(); ++i)
-    {
-        int id = mvIds[i];
+bool Tracking::NeedNewKeyFrame() {
+    if (mpFeatureDetector->mvCurPts.size() < 20) return true;
+    double total_parallax = 0.0; int common_tracked_pts_cnt = 0;
+    for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i) {
+        int id = mpFeatureDetector->mvIds[i];
         auto it = mvpPrevKFPointsMap.find(id);
-        if (it != mvpPrevKFPointsMap.end())
-        {
-            total_parallax += Distance(mvCurPts[i], it->second);
+        if (it != mvpPrevKFPointsMap.end()) {
+            double dx = mpFeatureDetector->mvCurPts[i].x - it->second.x;
+            double dy = mpFeatureDetector->mvCurPts[i].y - it->second.y;
+            total_parallax += std::sqrt(dx * dx + dy * dy);
             common_tracked_pts_cnt++;
         }
     }
-    if (common_tracked_pts_cnt == 0)
-        return true;
-    double average_parallax = total_parallax / common_tracked_pts_cnt;
-
-    // 【修改】使用本地缓存参数 mKeyframeParallax
-    return average_parallax >= mKeyframeParallax;
-}
-
-bool Tracking::TriangulateStereo(const cv::Point2f &ptLeft, const cv::Point2f &ptRight,
-                                 const Eigen::Matrix4d &T_w_c0, const Eigen::Matrix4d &T_w_c1,
-                                 Eigen::Vector3d &P_w)
-{
-    // 【修改】使用局部固化参数 mCx, mFx 进行去中心反投影
-    double x0 = (ptLeft.x - mCx) / mFx;
-    double y0 = (ptLeft.y - mCy) / mFy;
-    double x1 = (ptRight.x - mCx) / mFx;
-    double y1 = (ptRight.y - mCy) / mFy;
-
-    Eigen::Matrix4d T_c0_w = T_w_c0.inverse();
-    Eigen::Matrix4d T_c1_w = T_w_c1.inverse();
-    Eigen::Matrix4d A;
-    A.row(0) = x0 * T_c0_w.row(2) - T_c0_w.row(0);
-    A.row(1) = y0 * T_c0_w.row(2) - T_c0_w.row(1);
-    A.row(2) = x1 * T_c1_w.row(2) - T_c1_w.row(0);
-    A.row(3) = y1 * T_c1_w.row(2) - T_c1_w.row(1);
-
-    Eigen::JacobiSVD<Eigen::Matrix4d> svd(A, Eigen::ComputeFullV);
-    Eigen::Vector4d X_w = svd.matrixV().col(3);
-    if (std::abs(X_w.w()) < 1e-6)
-        return false;
-    P_w = X_w.head<3>() / X_w.w();
-
-    // 【修改】使用局部外参解算基线长度，防线程读写冲突
-    Eigen::Vector3d t_c0 = mBodyTCam0.block<3, 1>(0, 3);
-    Eigen::Vector3d t_c1 = mBodyTCam1.block<3, 1>(0, 3);
-    double baseline = (t_c1 - t_c0).norm();
-    if (baseline < 1e-4)
-        baseline = 0.53715;
-
-    // 【修改】使用局部参数 mFx
-    double max_reliable_depth = (mFx * baseline) / 1.2;
-    Eigen::Vector4d P_w_homo(P_w.x(), P_w.y(), P_w.z(), 1.0);
-    double depth_cam0 = (T_c0_w * P_w_homo).z();
-    double depth_cam1 = (T_c1_w * P_w_homo).z();
-
-    if (depth_cam0 > 0.0 && depth_cam0 < max_reliable_depth && depth_cam1 > 0.0 && depth_cam1 < max_reliable_depth)
-        return true;
-    return false;
-}
-
-void Tracking::SetMask(const cv::Mat &img)
-{
-    mMask = cv::Mat(img.rows, img.cols, CV_8UC1, cv::Scalar(255));
-    std::vector<std::pair<int, std::pair<cv::Point2f, int>>> cntPtsId;
-    for (size_t i = 0; i < mvCurPts.size(); i++)
-        cntPtsId.push_back(std::make_pair(mvTrackCnt[i], std::make_pair(mvCurPts[i], mvIds[i])));
-    std::sort(cntPtsId.begin(), cntPtsId.end(), [](const auto &a, const auto &b)
-              { return a.first > b.first; });
-    mvCurPts.clear();
-    mvIds.clear();
-    mvTrackCnt.clear();
-    for (auto &it : cntPtsId)
-    {
-        cv::Point2f pt = it.second.first;
-        if (mMask.at<uchar>(pt) == 255)
-        {
-            mvCurPts.push_back(pt);
-            mvIds.push_back(it.second.second);
-            mvTrackCnt.push_back(it.first);
-
-            // 【修改】使用局部缓存的最小特征距离参数 mMinDist
-            cv::circle(mMask, pt, mMinDist, 0, -1);
-        }
-    }
-}
-
-void Tracking::AddNewFeatures(const cv::Mat &img)
-{
-    // 【修改】使用本地安全缓存变量 mMaxCnt
-    int countToDetect = mMaxCnt - (int)mvCurPts.size();
-    if (countToDetect > 0)
-    {
-        std::vector<cv::Point2f> nPts;
-
-        // 【修改】使用本地安全缓存变量 mMinDist
-        cv::goodFeaturesToTrack(img, nPts, countToDetect, 0.01, mMinDist, mMask);
-        for (const auto &pt : nPts)
-        {
-            mvCurPts.push_back(pt);
-            mvIds.push_back(mNextId++);
-            mvTrackCnt.push_back(1);
-        }
-    }
-}
-
-bool Tracking::InBorder(const cv::Point2f &pt, int cols, int rows)
-{
-    const int BORDER_SIZE = 1;
-    int img_x = cvRound(pt.x);
-    int img_y = cvRound(pt.y);
-    return BORDER_SIZE <= img_x && img_x < cols - BORDER_SIZE && BORDER_SIZE <= img_y && img_y < rows - BORDER_SIZE;
-}
-
-double Tracking::Distance(const cv::Point2f &pt1, const cv::Point2f &pt2)
-{
-    double dx = pt1.x - pt2.x;
-    double dy = pt1.y - pt2.y;
-    return std::sqrt(dx * dx + dy * dy);
+    if (common_tracked_pts_cnt == 0) return true;
+    return (total_parallax / common_tracked_pts_cnt) >= mKeyframeParallax;
 }
