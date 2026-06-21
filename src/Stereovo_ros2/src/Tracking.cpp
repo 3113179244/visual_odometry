@@ -12,6 +12,26 @@ Tracking::Tracking(std::shared_ptr<Map> pMap)
     : mIsInitialized(false), mNextId(0), mpMap(pMap), mNextKFId(0), mIsRunning(true)
 {
     mCurrentPose = Eigen::Isometry3d::Identity();
+
+    // =========================================================
+    // 【方案一核心修改】在启动独立常驻线程之前，对全局静态参数做一次性深拷贝
+    // =========================================================
+    mFlowBack         = (Parameters::FLOW_BACK != 0);
+    mFx               = Parameters::fx;
+    mFy               = Parameters::fy;
+    mCx               = Parameters::cx;
+    mCy               = Parameters::cy;
+    mK1               = Parameters::k1;
+    mK2               = Parameters::k2;
+    mP1               = Parameters::p1;
+    mP2               = Parameters::p2;
+    mKeyframeParallax = Parameters::KEYFRAME_PARALLAX;
+    mMaxCnt           = Parameters::MAX_CNT;
+    mMinDist          = Parameters::MIN_DIST;
+    mBodyTCam0        = Parameters::body_T_cam0;
+    mBodyTCam1        = Parameters::body_T_cam1;
+    // =========================================================
+
     mTrackThread = std::thread(&Tracking::TrackLoop, this);
 }
 
@@ -137,7 +157,8 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         std::vector<float> err;
         cv::calcOpticalFlowPyrLK(mPrevImg, grayLeft, mvPrevPts, currPts, status, err, cv::Size(21, 21), 3);
 
-        if (Parameters::FLOW_BACK)
+        // 【修改】使用本地安全缓存变量 mFlowBack
+        if (mFlowBack)
         {
             std::vector<cv::Point2f> reversePts = mvPrevPts;
             std::vector<uchar> reverseStatus;
@@ -195,8 +216,9 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
         if (objectPoints.size() >= 5)
         {
-            cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << Parameters::fx, 0, Parameters::cx, 0, Parameters::fy, Parameters::cy, 0, 0, 1);
-            cv::Mat distCoeffs = (cv::Mat_<double>(4, 1) << Parameters::k1, Parameters::k2, Parameters::p1, Parameters::p2);
+            // 【修改】利用固化好的内参矩阵与畸变参数，避免读取静态 Parameters 产生 Data Race
+            cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << mFx, 0, mCx, 0, mFy, mCy, 0, 0, 1);
+            cv::Mat distCoeffs = (cv::Mat_<double>(4, 1) << mK1, mK2, mP1, mP2);
             cv::Mat rvec, tvec;
             std::vector<int> inliers;
 
@@ -264,8 +286,10 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         cv::calcOpticalFlowPyrLK(grayLeft, grayRight, mvCurPts, mvRightPts, stereoStatus, stereoErr, cv::Size(21, 21), 3);
 
         Eigen::Matrix4d T_w_body = mCurrentPose.inverse().matrix();
-        Eigen::Matrix4d T_w_c0 = T_w_body * Parameters::body_T_cam0;
-        Eigen::Matrix4d T_w_c1 = T_w_body * Parameters::body_T_cam1;
+        
+        // 【修改】使用本地缓存的外参矩阵 mBodyTCam
+        Eigen::Matrix4d T_w_c0 = T_w_body * mBodyTCam0;
+        Eigen::Matrix4d T_w_c1 = T_w_body * mBodyTCam1;
 
         for (size_t i = 0; i < mvCurPts.size(); i++)
         {
@@ -367,17 +391,20 @@ bool Tracking::NeedNewKeyFrame()
     if (common_tracked_pts_cnt == 0)
         return true;
     double average_parallax = total_parallax / common_tracked_pts_cnt;
-    return average_parallax >= Parameters::KEYFRAME_PARALLAX;
+    
+    // 【修改】使用本地缓存参数 mKeyframeParallax
+    return average_parallax >= mKeyframeParallax;
 }
 
 bool Tracking::TriangulateStereo(const cv::Point2f &ptLeft, const cv::Point2f &ptRight,
                                  const Eigen::Matrix4d &T_w_c0, const Eigen::Matrix4d &T_w_c1,
                                  Eigen::Vector3d &P_w)
 {
-    double x0 = (ptLeft.x - Parameters::cx) / Parameters::fx;
-    double y0 = (ptLeft.y - Parameters::cy) / Parameters::fy;
-    double x1 = (ptRight.x - Parameters::cx) / Parameters::fx;
-    double y1 = (ptRight.y - Parameters::cy) / Parameters::fy;
+    // 【修改】使用局部固化参数 mCx, mFx 进行去中心反投影
+    double x0 = (ptLeft.x - mCx) / mFx;
+    double y0 = (ptLeft.y - mCy) / mFy;
+    double x1 = (ptRight.x - mCx) / mFx;
+    double y1 = (ptRight.y - mCy) / mFy;
 
     Eigen::Matrix4d T_c0_w = T_w_c0.inverse();
     Eigen::Matrix4d T_c1_w = T_w_c1.inverse();
@@ -393,13 +420,15 @@ bool Tracking::TriangulateStereo(const cv::Point2f &ptLeft, const cv::Point2f &p
         return false;
     P_w = X_w.head<3>() / X_w.w();
 
-    Eigen::Vector3d t_c0 = Parameters::body_T_cam0.block<3, 1>(0, 3);
-    Eigen::Vector3d t_c1 = Parameters::body_T_cam1.block<3, 1>(0, 3);
+    // 【修改】使用局部外参解算基线长度，防线程读写冲突
+    Eigen::Vector3d t_c0 = mBodyTCam0.block<3, 1>(0, 3);
+    Eigen::Vector3d t_c1 = mBodyTCam1.block<3, 1>(0, 3);
     double baseline = (t_c1 - t_c0).norm();
     if (baseline < 1e-4)
         baseline = 0.53715;
 
-    double max_reliable_depth = (Parameters::fx * baseline) / 1.2;
+    // 【修改】使用局部参数 mFx
+    double max_reliable_depth = (mFx * baseline) / 1.2;
     Eigen::Vector4d P_w_homo(P_w.x(), P_w.y(), P_w.z(), 1.0);
     double depth_cam0 = (T_c0_w * P_w_homo).z();
     double depth_cam1 = (T_c1_w * P_w_homo).z();
@@ -428,18 +457,23 @@ void Tracking::SetMask(const cv::Mat &img)
             mvCurPts.push_back(pt);
             mvIds.push_back(it.second.second);
             mvTrackCnt.push_back(it.first);
-            cv::circle(mMask, pt, Parameters::MIN_DIST, 0, -1);
+            
+            // 【修改】使用局部缓存的最小特征距离参数 mMinDist
+            cv::circle(mMask, pt, mMinDist, 0, -1);
         }
     }
 }
 
 void Tracking::AddNewFeatures(const cv::Mat &img)
 {
-    int countToDetect = Parameters::MAX_CNT - (int)mvCurPts.size();
+    // 【修改】使用本地安全缓存变量 mMaxCnt
+    int countToDetect = mMaxCnt - (int)mvCurPts.size();
     if (countToDetect > 0)
     {
         std::vector<cv::Point2f> nPts;
-        cv::goodFeaturesToTrack(img, nPts, countToDetect, 0.01, Parameters::MIN_DIST, mMask);
+        
+        // 【修改】使用本地安全缓存变量 mMinDist
+        cv::goodFeaturesToTrack(img, nPts, countToDetect, 0.01, mMinDist, mMask);
         for (const auto &pt : nPts)
         {
             mvCurPts.push_back(pt);

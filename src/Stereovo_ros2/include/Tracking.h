@@ -95,6 +95,18 @@ private:
     std::queue<double> mTimeBuf;
 
     RenderCallback mRenderCb;
+
+    // =========================================================
+    // 【方案一新增】本地化参数缓存，彻底杜绝异步线程高频读取引发的数据竞争
+    // =========================================================
+    bool mFlowBack;
+    double mFx, mFy, mCx, mCy;
+    double mK1, mK2, mP1, mP2;
+    double mKeyframeParallax;
+    int mMaxCnt;
+    int mMinDist;
+    Eigen::Matrix4d mBodyTCam0;
+    Eigen::Matrix4d mBodyTCam1;
 };
 
 #endif // TRACKING_H
