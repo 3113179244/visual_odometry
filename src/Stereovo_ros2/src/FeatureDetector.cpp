@@ -71,7 +71,7 @@ bool FeatureDetector::EstimatePosePnP(
     cv::Mat distCoeffs = (cv::Mat_<double>(4, 1) << k1, k2, p1, p2);
     cv::Mat rvec, tvec; std::vector<int> inliers;
 
-    bool pnp_succ = cv::solvePnPRansac(objectPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, 100, 8.0, 0.99, inliers, cv::SOLVEPNP_ITERATIVE);
+    bool pnp_succ = cv::solvePnPRansac(objectPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, 100, 2.0, 0.99, inliers, cv::SOLVEPNP_ITERATIVE);
 
     if (pnp_succ && inliers.size() >= 4) {
         cv::Mat R; cv::Rodrigues(rvec, R);

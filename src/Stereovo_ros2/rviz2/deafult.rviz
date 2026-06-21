@@ -112,7 +112,7 @@ Visualization Manager:
       Class: rviz_default_plugins/PointCloud
       Color: 255; 255; 255
       Color Transformer: Intensity
-      Decay Time: 0
+      Decay Time: 10000
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
@@ -122,9 +122,9 @@ Visualization Manager:
       Name: PointCloud
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.009999999776482582
-      Style: Flat Squares
+      Size (Pixels): 1
+      Size (m): 0.10000000149011612
+      Style: Points
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -181,25 +181,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 10
+      Distance: 214.7578125
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0
-        Y: 0
-        Z: 0
+        X: -52.449588775634766
+        Y: 2.8822126388549805
+        Z: -29.905719757080078
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.785398006439209
+      Pitch: 1.3003978729248047
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 0.785398006439209
+      Yaw: 3.1935834884643555
     Saved: ~
 Window Geometry:
   Displays:
