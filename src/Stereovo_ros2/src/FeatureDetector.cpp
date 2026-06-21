@@ -48,7 +48,7 @@ bool FeatureDetector::EstimatePosePnP(
     double k1, double k2, double p1, double p2,
     Eigen::Isometry3d &currentPose) 
 {
-    if (mvCurPts.empty()) return false;
+    if (mvCurPts.empty() || mmIDToMapPoint.empty()) return false;
 
     std::vector<cv::Point3f> objectPoints;
     std::vector<cv::Point2f> imagePoints;
@@ -140,10 +140,17 @@ void FeatureDetector::TriangulateNewPoints(
 
     for (size_t i = 0; i < mvCurPts.size(); i++) {
         if (stereoStatus[i] && InBorder(mvRightPts[i], grayRight.cols, grayRight.rows)) {
+            
+            // =========================================================================
+            // 【核心修改】在右图的对应位置绘制绿色的点进行同步追踪显示
+            // =========================================================================
+            cv::Point2f ptRight = mvRightPts[i];
+            ptRight.x += grayLeft.cols; // 将坐标横向偏移一个左图的宽度，精准落在右图上
+            cv::circle(imgTrack, ptRight, 2, cv::Scalar(0, 255, 0), 2);
+
             auto it = mmIDToMapPoint.find(mvIds[i]);
             if (it == mmIDToMapPoint.end()) {
                 Eigen::Vector3d P_w;
-                // --- 核心数学公式移到了底层优化 ---
                 // 计算去中心反投影点
                 double x0 = (mvCurPts[i].x - cx) / fx; double y0 = (mvCurPts[i].y - cy) / fy;
                 double x1 = (mvRightPts[i].x - cx) / fx; double y1 = (mvRightPts[i].y - cy) / fy;
@@ -167,7 +174,6 @@ void FeatureDetector::TriangulateNewPoints(
                         mmIDToMapPoint[mvIds[i]] = pMP;
                         if (isKeyFrame) mpMap->AddMapPoint(pMP);
                         vWorldPoints.push_back(P_w);
-                        cv::circle(imgTrack, mvCurPts[i], 4, cv::Scalar(255, 255, 0), 1);
                     }
                 }
             } else {

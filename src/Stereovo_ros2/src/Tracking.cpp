@@ -111,7 +111,14 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     if (imRight.channels() == 3)
         cv::cvtColor(imRight, grayRight, cv::COLOR_BGR2GRAY);
 
-    cv::cvtColor(grayLeft, imgTrack, cv::COLOR_GRAY2BGR);
+    // =========================================================================
+    // 【核心修改】将左右目图像横向拼接组合成 VINS-Fusion 标配的双目拼接大图
+    // =========================================================================
+    cv::Mat imgLeftBGR, imgRightBGR;
+    cv::cvtColor(grayLeft, imgLeftBGR, cv::COLOR_GRAY2BGR);
+    cv::cvtColor(grayRight, imgRightBGR, cv::COLOR_GRAY2BGR);
+    cv::hconcat(imgLeftBGR, imgRightBGR, imgTrack);
+
     vWorldPoints.clear();
     vKFPositions.clear();
 
@@ -140,9 +147,12 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         mvpPrevKFPointsMap = initMeasurements;
         mIsInitialized = true;
 
-        for (const auto &pt : mpFeatureDetector->mvCurPts)
+        // 第一帧左图点同样使用红蓝色彩显示
+        for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
-            cv::circle(imgTrack, pt, 2, cv::Scalar(0, 0, 255), 2);
+            double len = std::min(1.0, 1.0 * mpFeatureDetector->mvTrackCnt[i] / 20.0);
+            cv::Scalar ptColor = cv::Scalar(255 * (1 - len), 0, 255 * len);
+            cv::circle(imgTrack, mpFeatureDetector->mvCurPts[i], 2, ptColor, 2);
         }
 
         vKFPositions.push_back(mCurrentPose.inverse().translation());
@@ -164,7 +174,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     // 步长 4：挑选并判定当前帧是否为关键帧
     bool isKeyFrame = NeedNewKeyFrame();
 
-    // 步长 5：立体匹配与双目自适应深度三角化
+    // 步长 5：立体匹配与双目自适应深度三角化（右图特征点在此内部完成绿色渲染）
     mpFeatureDetector->TriangulateNewPoints(
         grayLeft, grayRight, mCurrentPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
         mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);
@@ -210,17 +220,14 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     std::cout << "[SLAM地图管理] 全局关键帧总数: " << allKFs.size()
               << " | 全局地图固化路标点数: " << mpMap->GetMapPointsSize() << std::endl;
 
-    // 绘制轨迹历史光流箭头
+    // =========================================================================
+    // 【核心修改】红蓝渐变渲染左图的追踪特征点
+    // =========================================================================
     for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); i++)
     {
         double len = std::min(1.0, 1.0 * mpFeatureDetector->mvTrackCnt[i] / 20.0);
         cv::Scalar ptColor = cv::Scalar(255 * (1 - len), 0, 255 * len);
         cv::circle(imgTrack, mpFeatureDetector->mvCurPts[i], 2, ptColor, 2);
-        auto it = mpFeatureDetector->mInversePrevPtsMap.find(mpFeatureDetector->mvIds[i]);
-        if (it != mpFeatureDetector->mInversePrevPtsMap.end())
-        {
-            cv::arrowedLine(imgTrack, it->second, mpFeatureDetector->mvCurPts[i], cv::Scalar(0, 255, 0), 1, 8, 0, 0.2);
-        }
     }
 
     mPrevImg = grayLeft.clone();
