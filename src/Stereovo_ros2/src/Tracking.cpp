@@ -10,8 +10,6 @@
 Tracking::Tracking(std::shared_ptr<Map> pMap)
     : mpMap(pMap), mIsInitialized(false), mIsRunning(true), mNeedOptimize(false), mNextKFId(0)
 {
-    // 在构造函数函数体内的最后一行添加
-    mTrajectoryWriter.Init("/home/wzj/output/pose.txt");
     // 对全局静态参数做一次性深拷贝，彻底杜绝数据竞争
     mFlowBack = (Parameters::FLOW_BACK != 0);
     mFx = Parameters::fx;
@@ -49,8 +47,6 @@ Tracking::~Tracking()
         mTrackThread.join();
     if (mBackendThread.joinable())
         mBackendThread.join();
-    // 在析构函数函数体内的最后一行添加
-    mTrajectoryWriter.Close();
 }
 
 void Tracking::RegisterCallback(RenderCallback cb)
@@ -229,7 +225,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
     mPrevImg = grayLeft.clone();
     mpFeatureDetector->UpdatePreviousStatus(grayLeft);
-    mTrajectoryWriter.WritePoseKITTI(mCurrentPose);
     return mCurrentPose;
 }
 

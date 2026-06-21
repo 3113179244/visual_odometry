@@ -28,7 +28,7 @@
 #include "Tracking.h"
 #include "Map.h"
 #include "Parameters.h"
-
+#include <fstream>
 class StereoVONode
 {
 public:
@@ -72,7 +72,8 @@ public:
 
         sync_thread_ = std::thread(&StereoVONode::sync_process, this);
         PublishExtrinsicOnce();
-
+        std::ofstream foutK(Parameters::OUTPUT_PATH + "trajectory.txt", std::ios::trunc);
+        foutK.close();
         RCLCPP_INFO(node_->get_logger(), "VINS-Fusion 兼容模式双目前端已启动（坐标系深度优化版）");
     }
 
@@ -184,7 +185,7 @@ private:
     void PublishOdometry(const std_msgs::msg::Header &header,
                          const Eigen::Vector3d &P, const Eigen::Quaterniond &Q)
     {
-        // 1. 发布标准里程计
+        // 1. 发布标准 ROS 里程计
         nav_msgs::msg::Odometry odom;
         odom.header = header;
         odom.header.frame_id = "world";
@@ -216,7 +217,6 @@ private:
         // 3. 广播 world -> body 动态 TF 关系
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header = header;
-        transformStamped.header.frame_id = "world";
         transformStamped.child_frame_id = "body";
         transformStamped.transform.translation.x = P.x();
         transformStamped.transform.translation.y = P.y();
@@ -226,6 +226,25 @@ private:
         transformStamped.transform.rotation.z = Q.z();
         transformStamped.transform.rotation.w = Q.w();
         tf_broadcaster_->sendTransform(transformStamped);
+
+        // 4. 【核心修改】直接自动保存为标准的 KITTI 格式 (12列，空格分隔)
+        std::string kitti_filename = Parameters::OUTPUT_PATH + "trajectory.txt";
+        std::ofstream foutK(kitti_filename, std::ios::app);
+        if (foutK.is_open())
+        {
+            foutK.setf(std::ios::fixed, std::ios::floatfield);
+            foutK.precision(6); // KITTI 矩阵的标准保留精度
+            
+            // 将四元数转为 3x3 旋转矩阵
+            Eigen::Matrix3d R = Q.toRotationMatrix();
+            
+            // 严格按照 KITTI 格式单行写入：R11 R12 R13 Tx R21 R22 R23 Ty R31 R32 R33 Tz
+            foutK << R(0,0) << " " << R(0,1) << " " << R(0,2) << " " << P.x() << " "
+                  << R(1,0) << " " << R(1,1) << " " << R(1,2) << " " << P.y() << " "
+                  << R(2,0) << " " << R(2,1) << " " << R(2,2) << " " << P.z() << "\n";
+                  
+            foutK.close();
+        }
     }
 
     void PublishCameraPose(const std_msgs::msg::Header &header,
@@ -248,14 +267,14 @@ private:
         visualization_msgs::msg::MarkerArray frustum_array;
         visualization_msgs::msg::Marker edge_marker;
         edge_marker.header = header;
-        
+
         // 【核心修复一】直接将坐标系绑定到实时移动的 "body" 上！
-        edge_marker.header.frame_id = "body"; 
+        edge_marker.header.frame_id = "body";
         edge_marker.ns = "camera_pose_visual";
         edge_marker.id = 0;
         edge_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
         edge_marker.action = visualization_msgs::msg::Marker::ADD;
-        
+
         // 既然绑定在了 body 坐标系上，Marker 本身的局部 Pose 直接归零单位化即可，省去手工复杂矩阵翻转
         edge_marker.pose.position.x = 0.0;
         edge_marker.pose.position.y = 0.0;
@@ -265,9 +284,9 @@ private:
         edge_marker.pose.orientation.z = 0.0;
         edge_marker.pose.orientation.w = 1.0;
 
-        edge_marker.scale.x = 0.03; 
+        edge_marker.scale.x = 0.03;
         edge_marker.color.r = 0.0;
-        edge_marker.color.g = 1.0; 
+        edge_marker.color.g = 1.0;
         edge_marker.color.b = 0.0;
         edge_marker.color.a = 1.0;
 
@@ -283,13 +302,13 @@ private:
             return pt;
         };
 
-        geometry_msgs::msg::Point r_o  = create_ros_body_pt(0, 0, 0);       // 光心
-        geometry_msgs::msg::Point r_p1 = create_ros_body_pt(2, 1, 0.5);    // 左上
-        geometry_msgs::msg::Point r_p2 = create_ros_body_pt(2, -1, 0.5);   // 右上
-        geometry_msgs::msg::Point r_p3 = create_ros_body_pt(2, -1, -0.5);  // 右下
-        geometry_msgs::msg::Point r_p4 = create_ros_body_pt(2, 1, -0.5);   // 左下
+        geometry_msgs::msg::Point r_o = create_ros_body_pt(0, 0, 0);      // 光心
+        geometry_msgs::msg::Point r_p1 = create_ros_body_pt(2, 1, 0.5);   // 左上
+        geometry_msgs::msg::Point r_p2 = create_ros_body_pt(2, -1, 0.5);  // 右上
+        geometry_msgs::msg::Point r_p3 = create_ros_body_pt(2, -1, -0.5); // 右下
+        geometry_msgs::msg::Point r_p4 = create_ros_body_pt(2, 1, -0.5);  // 左下
 
-        edge_marker.points = {r_o, r_p1,  r_o, r_p2,  r_o, r_p3,  r_o, r_p4,
+        edge_marker.points = {r_o, r_p1, r_o, r_p2, r_o, r_p3, r_o, r_p4,
                               r_p1, r_p2, r_p2, r_p3, r_p3, r_p4, r_p4, r_p1};
         frustum_array.markers.push_back(edge_marker);
         pub_camera_pose_visual_->publish(frustum_array);
@@ -305,8 +324,8 @@ private:
         // 旋转变换阵：视觉系 -> ROS标准系
         Eigen::Matrix3d R_ros_cam;
         R_ros_cam << 0, 0, 1,
-                    -1, 0, 0,
-                     0,-1, 0;
+            -1, 0, 0,
+            0, -1, 0;
 
         for (size_t i = 0; i < vWorldPoints.size(); ++i)
         {
@@ -345,8 +364,8 @@ private:
 
         Eigen::Matrix3d R_ros_cam;
         R_ros_cam << 0, 0, 1,
-                    -1, 0, 0,
-                     0,-1, 0;
+            -1, 0, 0,
+            0, -1, 0;
 
         for (const auto &pos : vKFPositions)
         {
@@ -396,9 +415,9 @@ private:
             return;
         sensor_msgs::msg::PointCloud feature_msg;
         feature_msg.header = header;
-        
+
         // 【核心修复二】将 frame_id 从 "world" 修改为 "body"，让其变为局部的归一化平面特征点
-        feature_msg.header.frame_id = "body"; 
+        feature_msg.header.frame_id = "body";
 
         sensor_msgs::msg::ChannelFloat32 id_ch, cam_ch, u_ch, v_ch, vx_ch, vy_ch;
         id_ch.name = "id";
@@ -413,10 +432,10 @@ private:
             // 计算归一化相机平面坐标 (OpenCV 视觉系下)
             double u_norm = (curPts[i].x - Parameters::cx) / Parameters::fx;
             double v_norm = (curPts[i].y - Parameters::cy) / Parameters::fy;
-            
+
             // 将归一化坐标也重映射到 ROS 坐标系 (视觉 Z 朝前变成 ROS X 朝前)
             geometry_msgs::msg::Point32 p;
-            p.x = 1.0f;                       // ROS的前方 X 对应原视觉轴的 Z
+            p.x = 1.0f;                        // ROS的前方 X 对应原视觉轴的 Z
             p.y = static_cast<float>(-u_norm); // ROS的左方 Y 对应原视觉轴的 -X
             p.z = static_cast<float>(-v_norm); // ROS的上方 Z 对应原视觉轴的 -Y
             feature_msg.points.push_back(p);
@@ -453,11 +472,11 @@ private:
 
         Eigen::Matrix3d R_ros_cam;
         R_ros_cam << 0, 0, 1,
-                    -1, 0, 0,
-                     0,-1, 0;
+            -1, 0, 0,
+            0, -1, 0;
 
         Eigen::Isometry3d Twc = Tcw.inverse();
-        
+
         // 转换解算出的里程计位姿到 ROS 标准三维空间
         Eigen::Vector3d P_ros = R_ros_cam * Twc.translation();
         Eigen::Matrix3d R_ros = R_ros_cam * Twc.rotation() * R_ros_cam.transpose();
