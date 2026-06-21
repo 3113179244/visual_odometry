@@ -19,7 +19,7 @@ public:
     // 1. 光流追踪与边界校验
     void TrackFeaturesLK(const cv::Mat &prevImg, const cv::Mat &currImg);
     
-    // 2. 位姿解算与 Inlier 过滤（内部维护 mmIDToMapPoint）
+    // 2. 位姿解算与 Inlier 过滤
     bool EstimatePosePnP(
         std::map<int, std::shared_ptr<MapPoint>> &mmIDToMapPoint,
         double fx, double fy, double cx, double cy,
@@ -43,8 +43,12 @@ public:
     // 5. 状态同步更新
     void UpdatePreviousStatus(const cv::Mat &grayLeft);
 
+    // 【修改】将公用的几何计算函数提升到 public 下，供 Tracking 等外部组件无碍调用
+    double Distance(const cv::Point2f &pt1, const cv::Point2f &pt2);
+    bool InBorder(const cv::Point2f &pt, int cols, int rows);
+
 public:
-    // 所有特征容器彻底从 Tracking 中剥离
+    // 特征容器剥离
     std::vector<cv::Point2f> mvCurPts;
     std::vector<cv::Point2f> mvPrevPts;
     std::vector<int> mvIds;
@@ -53,9 +57,6 @@ public:
     cv::Mat mMask;
 
 private:
-    bool InBorder(const cv::Point2f &pt, int cols, int rows);
-    double Distance(const cv::Point2f &pt1, const cv::Point2f &pt2);
-
     int mMaxCnt;
     int mMinDist;
     bool mFlowBack;
