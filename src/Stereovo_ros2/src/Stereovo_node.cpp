@@ -466,7 +466,7 @@ private:
         feature_msg.channels.push_back(vy_ch);
         pub_features_->publish(feature_msg);
     }
-    
+
     // 新增：在进程退出时，一次性把经历过完整 BA 优化的所有历史关键帧导出
     void SaveOptimizedKeyFrames()
     {
