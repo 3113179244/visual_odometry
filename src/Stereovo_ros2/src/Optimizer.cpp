@@ -181,7 +181,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
             Twc_opt.linear() = q_opt.toRotationMatrix();
             Twc_opt.translation() = t_opt;
             
-            kf->mTwc = Twc_opt; 
+            kf->SetPose(Twc_opt);
         }
 
         for (const auto& pair : mapMPIdToParameterBlock) {

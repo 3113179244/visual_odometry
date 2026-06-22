@@ -1,6 +1,11 @@
 #include "KeyFrame.h"
 
-// 如果你在头文件中已经完全实现了构造函数，这里可以不写构造函数体
 Eigen::Isometry3d KeyFrame::GetPose() {
+    std::unique_lock<std::mutex> lock(mMutexPose);
     return mTwc;
+}
+
+void KeyFrame::SetPose(const Eigen::Isometry3d& Twc_opt) {
+    std::unique_lock<std::mutex> lock(mMutexPose);
+    mTwc = Twc_opt;
 }

@@ -72,15 +72,24 @@ public:
 
         sync_thread_ = std::thread(&StereoVONode::sync_process, this);
         PublishExtrinsicOnce();
-        std::ofstream foutK(Parameters::OUTPUT_PATH + "trajectory.txt", std::ios::trunc);
-        foutK.close();
-        RCLCPP_INFO(node_->get_logger(), "VINS-Fusion 兼容模式双目前端已启动（坐标系深度优化版）");
+        fout_trajectory_.open(Parameters::OUTPUT_PATH + "trajectory.txt", std::ios::trunc);
+        if (!fout_trajectory_.is_open())
+        {
+            RCLCPP_ERROR(node_->get_logger(), "错误：无法创建或打开 trajectory.txt！");
+        }
     }
 
     ~StereoVONode()
     {
         if (sync_thread_.joinable())
             sync_thread_.join();
+
+        // 1. 关闭前端全帧率测距流
+        if (fout_trajectory_.is_open())
+            fout_trajectory_.close();
+
+        // 2. 触发调用：一次性打包保存最终优化完的关键帧高精度轨迹
+        SaveOptimizedKeyFrames();
     }
 
     std::shared_ptr<rclcpp::Node> get_node() const { return node_; }
@@ -236,17 +245,15 @@ private:
         // 4. 【核心修复】保存轨迹文件时，严格使用相机坐标系的 P_cam 和 R_cam
         std::string kitti_filename = Parameters::OUTPUT_PATH + "trajectory.txt";
         std::ofstream foutK(kitti_filename, std::ios::app);
-        if (foutK.is_open())
+        if (fout_trajectory_.is_open())
         {
-            foutK.setf(std::ios::fixed, std::ios::floatfield);
-            foutK.precision(6);
+            fout_trajectory_.setf(std::ios::fixed, std::ios::floatfield);
+            fout_trajectory_.precision(6);
 
-            // 写入真正的 KITTI 相机物理坐标系位姿
-            foutK << R_cam(0, 0) << " " << R_cam(0, 1) << " " << R_cam(0, 2) << " " << P_cam.x() << " "
-                  << R_cam(1, 0) << " " << R_cam(1, 1) << " " << R_cam(1, 2) << " " << P_cam.y() << " "
-                  << R_cam(2, 0) << " " << R_cam(2, 1) << " " << R_cam(2, 2) << " " << P_cam.z() << "\n";
-
-            foutK.close();
+            fout_trajectory_ << R_cam(0, 0) << " " << R_cam(0, 1) << " " << R_cam(0, 2) << " " << P_cam.x() << " "
+                             << R_cam(1, 0) << " " << R_cam(1, 1) << " " << R_cam(1, 2) << " " << P_cam.y() << " "
+                             << R_cam(2, 0) << " " << R_cam(2, 1) << " " << R_cam(2, 2) << " " << P_cam.z() << "\n";
+            fout_trajectory_.flush();
         }
     }
 
@@ -459,6 +466,33 @@ private:
         feature_msg.channels.push_back(vy_ch);
         pub_features_->publish(feature_msg);
     }
+    
+    // 新增：在进程退出时，一次性把经历过完整 BA 优化的所有历史关键帧导出
+    void SaveOptimizedKeyFrames()
+    {
+        std::string kitti_filename = Parameters::OUTPUT_PATH + "optimized_kf_trajectory.txt";
+        std::ofstream foutK(kitti_filename, std::ios::trunc);
+        if (!foutK.is_open())
+            return;
+
+        foutK.setf(std::ios::fixed, std::ios::floatfield);
+        foutK.precision(6);
+
+        auto allKFs = mpMap->GetAllKeyFrames();
+        for (const auto &kf : allKFs)
+        {
+            // 这里调用了加锁后的 GetPose()，安全拿到后端精调后的位姿
+            Eigen::Isometry3d Twc = kf->GetPose();
+            Eigen::Matrix3d R_cam = Twc.rotation();
+            Eigen::Vector3d P_cam = Twc.translation();
+
+            foutK << R_cam(0, 0) << " " << R_cam(0, 1) << " " << R_cam(0, 2) << " " << P_cam.x() << " "
+                  << R_cam(1, 0) << " " << R_cam(1, 1) << " " << R_cam(1, 2) << " " << P_cam.y() << " "
+                  << R_cam(2, 0) << " " << R_cam(2, 1) << " " << R_cam(2, 2) << " " << P_cam.z() << "\n";
+        }
+        foutK.close();
+        RCLCPP_INFO(node_->get_logger(), ">>> [SLAM系统结束] 已成功导出完全优化后的纯关键帧高精度轨迹！总计: %zu 帧", allKFs.size());
+    }
 
     void OnTrackingRendered(double timestamp,
                             const cv::Mat &feat_img,
@@ -524,7 +558,7 @@ private:
     std::queue<sensor_msgs::msg::Image::SharedPtr> img0_buf_, img1_buf_;
     std::mutex m_buf_;
     std::thread sync_thread_;
-
+    std::ofstream fout_trajectory_;
     std::mutex path_mutex_;
     std::vector<geometry_msgs::msg::PoseStamped> mv_path_poses_;
 
