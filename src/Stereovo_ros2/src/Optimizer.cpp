@@ -68,11 +68,73 @@ struct SREPROJECTION_ERROR
     } // Create 函数结束
 
     double u, v;           // 结构体内存储变量：保存特征点当前的实际 2D 像素观测坐标
-    double fx, fy, cx, cy; // 结构体内存储变量：保存相机固有的焦距和主点内参
+    double fx, fy, cx, cy; // 结构体内存储变量：保存相机固有的焦距 and 主点内参
 }; // 结构体结束
 
+
 // =========================================================================
-// 2. 局部 BA 主函数实现：精调滑动窗口内若干帧关键帧的绝对位姿以及对应的地图路标坐标
+// 2. 【新增特性】位姿边缘化状态先验代价函数 (Pose Prior Factor)
+// 作用：在切线空间 (Tangent Space) 下通过四元数乘积扰动和欧氏平移差计算 6 维残差，并融合高置信度信息矩阵
+// =========================================================================
+struct PosePriorFactor
+{
+    // 构造函数：传入历史累积出的先验平移、先验四元数以及代表置信度权重的信息矩阵平方根
+    PosePriorFactor(const Eigen::Vector3d& prior_t, const Eigen::Quaterniond& prior_q, const Eigen::Matrix<double, 6, 6>& sqrt_info)
+        : m_prior_t(prior_t), m_prior_q(prior_q), m_sqrt_info(sqrt_info) {}
+
+    template <typename T>
+    bool operator()(const T* const camera_pose, T* residuals) const
+    {
+        // 1. 解包待优化位姿参数块：[t_x, t_y, t_z, q_w, q_x, q_y, q_z]
+        T t[3] = {camera_pose[0], camera_pose[1], camera_pose[2]};
+        T q[4] = {camera_pose[3], camera_pose[4], camera_pose[5], camera_pose[6]};
+
+        // 2. 切线空间旋转残差计算：利用四元数扰动公式 dq = q_prior_inv * q
+        T qw1 = T(m_prior_q.w()), qx1 = T(-m_prior_q.x()), qy1 = T(-m_prior_q.y()), qz1 = T(-m_prior_q.z());
+        T qw2 = q[0], qx2 = q[1], qy2 = q[2], qz2 = q[3];
+
+        // 执行标准哈密顿四元数乘法运算 (Hamilton Product)
+        T dq_w = qw1 * qw2 - qx1 * qx2 - qy1 * qy2 - qz1 * qz2;
+        T dq_x = qw1 * qx2 + qx1 * qw2 + qy1 * qz2 - qz1 * qy2;
+        T dq_y = qw1 * qy2 - qx1 * qz2 + qy1 * qw2 + qz1 * qx2;
+        T dq_z = qw1 * qz2 + qx1 * qy2 - qy1 * qx2 + qz1 * qw2;
+
+        // 引入双轴正负号最短路径保护机制 (Ensure shortest path conversion)
+        T sign = (dq_w >= T(0.0)) ? T(1.0) : T(-1.0);
+
+        // 3. 拼装未加权的 6 自由度原始空间残差 (前3维平移残差，后3维李代数轴角残差)
+        Eigen::Matrix<T, 6, 1> raw_residuals;
+        raw_residuals[0] = t[0] - T(m_prior_t.x());
+        raw_residuals[1] = t[1] - T(m_prior_t.y());
+        raw_residuals[2] = t[2] - T(m_prior_t.z());
+        raw_residuals[3] = T(2.0) * sign * dq_x;
+        raw_residuals[4] = T(2.0) * sign * dq_y;
+        raw_residuals[5] = T(2.0) * sign * dq_z;
+
+        // 4. 左乘置信度信息权重矩阵，保留历史相干空间记忆
+        Eigen::Matrix<T, 6, 1> weighted_residuals = m_sqrt_info.cast<T>() * raw_residuals;
+        for (int i = 0; i < 6; ++i)
+        {
+            residuals[i] = weighted_residuals[i];
+        }
+        return true;
+    }
+
+    // 静态工厂构建函数：实例化 6 维残差、7 维位姿参数块的自动微分因子
+    static ceres::CostFunction* Create(const Eigen::Vector3d& prior_t, const Eigen::Quaterniond& prior_q, const Eigen::Matrix<double, 6, 6>& sqrt_info)
+    {
+        return (new ceres::AutoDiffCostFunction<PosePriorFactor, 6, 7>(
+            new PosePriorFactor(prior_t, prior_q, sqrt_info)));
+    }
+
+    Eigen::Vector3d m_prior_t;
+    Eigen::Quaterniond m_prior_q;
+    Eigen::Matrix<double, 6, 6> m_sqrt_info;
+};
+
+
+// =========================================================================
+// 3. 局部 BA 主函数实现：精调滑动窗口内若干帧关键帧的绝对位姿以及对应的地图路标坐标
 // =========================================================================
 void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
 { //
@@ -91,8 +153,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
         activeKFs.push_back(allKFs[i]); // 将对应的关键帧指针塞入激活帧容器中
     } // 滑窗帧筛选结束
 
-    ceres::Problem problem;                                         // 实例化 Ceres 的非线性优化问题管理核心对象（因子图图基底）
-    ceres::LossFunction *loss_function = new ceres::HuberLoss(1.0); // 实例化经典的 Huber 鲁棒核函数（阈值为1.0像素），用于强力抑制光流误匹配引入的外点噪声
+    ceres::Problem problem; // 实例化 Ceres 的非线性优化问题管理核心对象（因子图图基底）
 
     std::map<unsigned long, std::vector<double>> mapKFIdToParameterBlock; // 声明局部字典：建立从“关键帧专属 ID”到“7维双精度优化参数块”的参数化路由
     std::map<int, std::vector<double>> mapMPIdToParameterBlock;           // 声明局部字典：建立从“路标点特征 ID”到“3维双精度优化坐标块”的参数化路由
@@ -117,7 +178,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
     } // 装载帧位姿结束
 
     // 【算法重大性能优化】拉出所有的地图点，预先在堆内存中生成一个专属的局部哈希检索表
-    // 作用：彻底杜绝了原先版本在双层 for 循环内部采用线性查找导致整个优化复杂度随地图膨胀呈 $O(N)$ 指数级灾难暴涨的硬伤，降为常数级 $O(1)$。
+    // 作用：彻底杜绝了原先版本在双层 for 循环内部采用线性查找导致整个优化复杂度随地图膨胀呈 O(N) 指数级灾难暴涨的硬伤，降为常数级 O(1)。
     std::vector<std::shared_ptr<MapPoint>> allMPs = pMap->GetAllMapPoints(); // 线程安全拉取当前小地图中累积沉淀的全局 3D 地图点路标集合
     std::unordered_map<int, std::shared_ptr<MapPoint>> mapIdToMP;            // 声明高效局域无序哈希映射字典
     for (const auto &mp : allMPs)
@@ -134,7 +195,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
             int mp_id = obs.first;         // 提取当前被观测特征的唯一特征 ID
             cv::Point2f pt2d = obs.second; // 提取当前特征在当前帧左图平面上的真实测量像素坐标 (u, v)
 
-            // 【核心性能优化处】利用刚刚在上面预先构建的内存哈希映射表进行 $O(1)$ 级瞬间碰撞定位
+            // 【核心性能优化处】利用刚刚在上面预先构建的内存哈希映射表进行 O(1) 级瞬间碰撞定位
             auto it_mp = mapIdToMP.find(mp_id); // 在哈希字典里定向查找当前特征 ID 对应的实体 3D 地图点路标
             if (it_mp == mapIdToMP.end())
                 continue;                                       // 如果没找到（说明是边缘化的坏点），直接略过此点不建约束
@@ -152,14 +213,36 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
             ceres::CostFunction *cost_function = SREPROJECTION_ERROR::Create( //
                 pt2d.x, pt2d.y, cam_fx, cam_fy, cam_cx, cam_cy);              // 将当前测量的像素像素点与相机内参数打包传送进去
 
+            // =========================================================================
+            // 【核心改进一：自适应鲁棒核函数 (Adaptive Robust Kernel)】
+            // 原理：新三角化路标由于初始基线比和匹配滑移，深度具有极高的不确定度（初始噪声大）。
+            // 通过获取地图点当前已被成功观测的频次梯队，动态绑定核函数保护阈值 delta，避免优质新点在优化初期被当做杂点强制剪枝。
+            // =========================================================================
+            int obs_count = targetMP->GetObservationCount();
+            double huber_delta = 1.0;
+            if (obs_count >= 5)
+            {
+                huber_delta = 1.0; // 高稳定梯队（≥5帧共视）：代表系统绝对锁定的骨干点，施加严苛阈值，绝不允许其残差大幅震荡
+            }
+            else if (obs_count >= 2)
+            {
+                huber_delta = 1.5; // 中等稳定梯队（2-4帧共视）：给予平滑过渡容忍区
+            }
+            else
+            {
+                huber_delta = 3.0; // 新三角化梯队（首帧观测点）：放宽深度搜索包容度，允许产生初期较大残差，给算法创造收敛空间
+            }
+            ceres::LossFunction *adaptive_loss_function = new ceres::HuberLoss(huber_delta); // 为该约束边量身分配带有自适应阈值的鲁棒核函数
+            // =========================================================================
+
             // 向 Ceres 核心问题中添加残差边（构建因子约束图：代价函数，核函数，优化关键帧位姿参数块指针，优化地图点参数块指针）
-            problem.AddResidualBlock(cost_function, loss_function,           //
+            problem.AddResidualBlock(cost_function, adaptive_loss_function,  //
                                      mapKFIdToParameterBlock[kf_id].data(),  // 传入当前对应的 7 维帧位姿参数块的首地址
                                      mapMPIdToParameterBlock[mp_id].data()); // 传入当前对应的 3 维地图点路标参数块的首地址
         } // 内层循环结束
     } // 外层循环约束构建完成
 
-    // 4. 设置四元数流形空间约束并固定滑窗首帧（李代数流形空间设置阶段）
+    // 4. 设置四元数流形空间约束并对滑窗首帧施加边缘化先验软约束（李代数流形空间设置与先验因子添加阶段）
     for (size_t i = 0; i < activeKFs.size(); ++i)
     {                                                                // 重新轮询激活的关键帧
         auto kf = activeKFs[i];                                      // 获取当前处理帧的智能指针
@@ -176,12 +259,28 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
                                                    new ceres::IdentityParameterization(3), quaternion_parameterization)); // 申明前 3 维用恒等参数化，后 4 维绑定刚才创建的四元数参数化结构
 #endif                                                                                                                     // 条件编译分支结束
 
-        // 【SLAM绝对关键基准锚定】如果当前处理的是滑动窗口内的第 1 个关键帧
+        // =========================================================================
+        // 【核心改进二：边缘化先验因子软约束 (Pose Prior Factor)】
+        // 原理：原代码采用 SetParameterBlockConstant 强行把滑窗首帧 (i=0) 锁死。这种生硬切断几何约束的做法会导致先验状态与后续滑动状态的协方差硬性解耦。
+        // 现在的做法：将滑窗头帧从固定参数块中释放出来，转而添加一个自定义的 PosePriorFactor，将其前一步累积出的状态作为先验锚点，允许其在具有物理意义的高置信度范围内进行软微调。
+        // =========================================================================
         if (i == 0)
-        {                                                 //
-            problem.SetParameterBlockConstant(pose_data); // 强行将该滑窗头帧设为固定常数不变（不参与迭代求解），作为局部因子图绝对坐标系和尺度的参考源头，防规范自由度（Gauge Freedom）丢失
-        } // 锚定结束
-    } // 流形约束赋予完成
+        {
+            Eigen::Isometry3d Twc_prior = kf->GetPose();       // 获取当前累积的最老历史位姿基准
+            Eigen::Vector3d prior_t = Twc_prior.translation(); // 提炼绝对物理平移作为先验中心点
+            Eigen::Quaterniond prior_q(Twc_prior.rotation());  // 提炼旋转四元数作为先验中心点
+
+            // 构造代表历史空间记忆强度的 6x6 协方差逆矩阵（信息矩阵的平方根形式）
+            Eigen::Matrix<double, 6, 6> sqrt_info = Eigen::Matrix<double, 6, 6>::Identity();
+            sqrt_info.block<3, 3>(0, 0) *= 50.0;  // 设定平移方向刚度，使其保持亚厘米级软约束
+            sqrt_info.block<3, 3>(3, 3) *= 100.0; // 设定旋转方向刚度，由于扰动对坐标投影影响大，给予更高的置信度因子
+
+            // 通过静态工厂实例化先验代价约束块
+            ceres::CostFunction* prior_cost_function = PosePriorFactor::Create(prior_t, prior_q, sqrt_info);
+            problem.AddResidualBlock(prior_cost_function, nullptr, pose_data); // 将该软约束边植入因子图中，从而完美消除 Gauge Freedom
+        }
+        // =========================================================================
+    } // 流形约束与先验因子的赋予完成
 
     // 5. 求解器高级参数配置
     ceres::Solver::Options options;                                  // 声明 Ceres 求解器选项配置大结构体
@@ -215,7 +314,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
             int mp_id = pair.first;                             // 取得对应的特征 ID
             const auto &data = pair.second;                     // 取得 Ceres 迭代收敛后的最新高精度 3 维世界绝对空间位置数组
             Eigen::Vector3d pos_opt(data[0], data[1], data[2]); // 利用精调数据封装回 Eigen 3D 绝对物理世界向量
-            mapIdToMPRef[mp_id]->SetWorldPos(pos_opt);          // 通过原先备份持有的路由指针，调用内置线程安全加锁接口 SetWorldPos，刷回全局实体小地图中
+            mapIdToMPRef[mp_id]->SetWorldPos(pos_opt);          // 通过原先备份持原有的路由指针，调用内置线程安全加锁接口 SetWorldPos，刷回全局实体小地图中
         } // 地图路标点位置批量写回完成
     } // 收敛判定写回分支完成
 } // 局部滑动窗口图优化 LocalBundleAdjustment 函数主体圆满结束
