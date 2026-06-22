@@ -12,14 +12,14 @@ def generate_launch_description():
     # 2. 声明参数文件的绝对路径（默认指向你指定的 KITTI yaml 文件）
     config_file_arg = DeclareLaunchArgument(
         'config_file',
-        default_value='/home/wzj/visual_odometry/src/Stereovo_ros2/config/kitti_config04-12.yaml',
+        default_value='/home/wzj/visual_odometry/src/stereovo_ros2/config/kitti_config04-12.yaml',
         description='SLAM 主配置文件绝对路径'
     )
 
     # 3. 声明 rviz2 配置文件的绝对路径
     rviz_file_arg = DeclareLaunchArgument(
         'rviz_config',
-        default_value='/home/wzj/visual_odometry/src/Stereovo_ros2/rviz2/deafult.rviz',
+        default_value='/home/wzj/visual_odometry/src/stereovo_ros2/rviz2/deafult.rviz',
         description='RViz2 布局配置文件绝对路径'
     )
 
