@@ -71,7 +71,6 @@ struct SREPROJECTION_ERROR
     double fx, fy, cx, cy; // 结构体内存储变量：保存相机固有的焦距 and 主点内参
 }; // 结构体结束
 
-
 // =========================================================================
 // 2. 【新增特性】位姿边缘化状态先验代价函数 (Pose Prior Factor)
 // 作用：在切线空间 (Tangent Space) 下通过四元数乘积扰动和欧氏平移差计算 6 维残差，并融合高置信度信息矩阵
@@ -79,11 +78,11 @@ struct SREPROJECTION_ERROR
 struct PosePriorFactor
 {
     // 构造函数：传入历史累积出的先验平移、先验四元数以及代表置信度权重的信息矩阵平方根
-    PosePriorFactor(const Eigen::Vector3d& prior_t, const Eigen::Quaterniond& prior_q, const Eigen::Matrix<double, 6, 6>& sqrt_info)
+    PosePriorFactor(const Eigen::Vector3d &prior_t, const Eigen::Quaterniond &prior_q, const Eigen::Matrix<double, 6, 6> &sqrt_info)
         : m_prior_t(prior_t), m_prior_q(prior_q), m_sqrt_info(sqrt_info) {}
 
     template <typename T>
-    bool operator()(const T* const camera_pose, T* residuals) const
+    bool operator()(const T *const camera_pose, T *residuals) const
     {
         // 1. 解包待优化位姿参数块：[t_x, t_y, t_z, q_w, q_x, q_y, q_z]
         T t[3] = {camera_pose[0], camera_pose[1], camera_pose[2]};
@@ -121,7 +120,7 @@ struct PosePriorFactor
     }
 
     // 静态工厂构建函数：实例化 6 维残差、7 维位姿参数块的自动微分因子
-    static ceres::CostFunction* Create(const Eigen::Vector3d& prior_t, const Eigen::Quaterniond& prior_q, const Eigen::Matrix<double, 6, 6>& sqrt_info)
+    static ceres::CostFunction *Create(const Eigen::Vector3d &prior_t, const Eigen::Quaterniond &prior_q, const Eigen::Matrix<double, 6, 6> &sqrt_info)
     {
         return (new ceres::AutoDiffCostFunction<PosePriorFactor, 6, 7>(
             new PosePriorFactor(prior_t, prior_q, sqrt_info)));
@@ -131,7 +130,6 @@ struct PosePriorFactor
     Eigen::Quaterniond m_prior_q;
     Eigen::Matrix<double, 6, 6> m_sqrt_info;
 };
-
 
 // =========================================================================
 // 3. 局部 BA 主函数实现：精调滑动窗口内若干帧关键帧的绝对位姿以及对应的地图路标坐标
@@ -276,7 +274,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
             sqrt_info.block<3, 3>(3, 3) *= 100.0; // 设定旋转方向刚度，由于扰动对坐标投影影响大，给予更高的置信度因子
 
             // 通过静态工厂实例化先验代价约束块
-            ceres::CostFunction* prior_cost_function = PosePriorFactor::Create(prior_t, prior_q, sqrt_info);
+            ceres::CostFunction *prior_cost_function = PosePriorFactor::Create(prior_t, prior_q, sqrt_info);
             problem.AddResidualBlock(prior_cost_function, nullptr, pose_data); // 将该软约束边植入因子图中，从而完美消除 Gauge Freedom
         }
         // =========================================================================
