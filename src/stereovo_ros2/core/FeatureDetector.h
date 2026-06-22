@@ -11,14 +11,15 @@
 class MapPoint;
 class Map;
 
-class FeatureDetector {
+class FeatureDetector
+{
 public:
     FeatureDetector(int maxCnt, int minDist, bool flowBack);
     ~FeatureDetector() = default;
 
     // 1. 光流追踪与边界校验
     void TrackFeaturesLK(const cv::Mat &prevImg, const cv::Mat &currImg);
-    
+
     // 2. 位姿解算与 Inlier 过滤
     bool EstimatePosePnP(
         std::map<int, std::shared_ptr<MapPoint>> &mmIDToMapPoint,

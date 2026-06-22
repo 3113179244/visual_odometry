@@ -16,7 +16,8 @@ class Map;
 class MapPoint;
 class FeatureDetector;
 
-class Tracking {
+class Tracking
+{
 public:
     // 回调函数类型定义
     using RenderCallback = std::function<void(
@@ -25,9 +26,8 @@ public:
         const std::vector<Eigen::Vector3d> &vWorldPoints,
         const std::vector<Eigen::Vector3d> &vKFPositions,
         const Eigen::Isometry3d &Tcw,
-        const std::vector<cv::Point2f> &curPts, 
-        const std::vector<int> &ids             
-    )>;
+        const std::vector<cv::Point2f> &curPts,
+        const std::vector<int> &ids)>;
 
     Tracking(std::shared_ptr<Map> pMap);
     ~Tracking();
@@ -56,11 +56,11 @@ private:
 
     // 核心解耦组件
     std::unique_ptr<FeatureDetector> mpFeatureDetector;
-    std::shared_ptr<Map> mpMap;                              
-    std::map<int, std::shared_ptr<MapPoint>> mmIDToMapPoint; 
-    std::map<int, cv::Point2f> mvpPrevKFPointsMap; 
-    unsigned long mNextKFId;                       
-    Eigen::Isometry3d mCurrentPose;                
+    std::shared_ptr<Map> mpMap;
+    std::map<int, std::shared_ptr<MapPoint>> mmIDToMapPoint;
+    std::map<int, cv::Point2f> mvpPrevKFPointsMap;
+    unsigned long mNextKFId;
+    Eigen::Isometry3d mCurrentPose;
 
     // 前端同步双输入缓存队列
     std::thread mTrackThread;
@@ -85,10 +85,10 @@ private:
     // ==========================================
     // 后端异步 Ceres 优化控制信号
     // ==========================================
-    std::thread mBackendThread;     
-    std::mutex mMutexBackend;       
-    std::condition_variable mCondBackend; 
-    bool mNeedOptimize;             
+    std::thread mBackendThread;
+    std::mutex mMutexBackend;
+    std::condition_variable mCondBackend;
+    bool mNeedOptimize;
 };
 
 #endif // TRACKING_H

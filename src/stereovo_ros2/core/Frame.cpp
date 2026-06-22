@@ -1,6 +1,6 @@
-#include "Frame.h"
-#include "MapPoint.h"
-#include "Camera.h"
+#include "core/Frame.h"
+#include "core/MapPoint.h"
+#include "utils/Camera.h"
 
 // 初始化静态成员变量
 unsigned long Frame::nNextId = 0;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(Stereovo_ros2)
+project(stereovo_ros2)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 14) 
@@ -9,7 +9,7 @@ add_compile_options(-Wextra -Wpedantic)
 set(CMAKE_BUILD_TYPE Release)
 
 # -----------------------------------------------------------------------------
-# 1. 寻找 ROS 2 官方依赖包 (同步 VINS)
+# 1. 寻找 ROS 2 官方依赖包
 # -----------------------------------------------------------------------------
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -32,28 +32,34 @@ find_package(Ceres REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 # -----------------------------------------------------------------------------
-# 3. 头文件包含路径
+# 3. 头文件包含路径 (灵魂改动：将当前包根目录加入搜寻，支持 "core/xxx.h" 导入)
 # -----------------------------------------------------------------------------
 include_directories(
   include
+  ${CMAKE_CURRENT_SOURCE_DIR}   # 允许编译器从当前功能包根目录下寻找子文件夹
   ${OpenCV_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
   ${CERES_INCLUDE_DIRS}
 )
 
 # -----------------------------------------------------------------------------
-# 4. 创建 SLAM 核心算法库 (类似 VINS_lib)
+# 4. 创建纯 C++ SLAM 核心算法库 (方案 B 目录结构)
 # -----------------------------------------------------------------------------
 add_library(${PROJECT_NAME}_lib
-  src/Camera.cpp
-  src/FeatureDetector.cpp
-  src/Frame.cpp
-  src/KeyFrame.cpp
-  src/Map.cpp
-  src/MapPoint.cpp
-  src/Optimizer.cpp
-  src/Tracking.cpp
-  src/Parameters.cpp
+  # 基础与工具模块
+  utils/Camera.cpp
+  utils/Parameters.cpp
+
+  # 前端核心模块
+  core/FeatureDetector.cpp
+  core/Frame.cpp
+  core/KeyFrame.cpp
+  core/Tracking.cpp
+  core/Map.cpp
+  core/MapPoint.cpp
+
+  # 后端优化模块
+  backend/Optimizer.cpp
 )
 
 # 链接第三方数学库
@@ -62,7 +68,7 @@ target_link_libraries(${PROJECT_NAME}_lib
   ${CERES_LIBRARIES} 
 )
 
-# 链接 ROS 2 依赖组件
+# 链接 ROS 2 依赖组件到算法库
 ament_target_dependencies(${PROJECT_NAME}_lib
   rclcpp 
   rcpputils 
@@ -78,7 +84,7 @@ ament_target_dependencies(${PROJECT_NAME}_lib
 )
 
 # -----------------------------------------------------------------------------
-# 5. 创建 ROS 2 可执行节点主入口
+# 5. 创建 ROS 2 可执行节点主入口 (保留在原 src/ 目录下)
 # -----------------------------------------------------------------------------
 add_executable(Stereovo_node src/Stereovo_node.cpp)
 
@@ -101,20 +107,17 @@ ament_target_dependencies(Stereovo_node
 )
 
 # -----------------------------------------------------------------------------
-# 6. 安装与导出规则 (ROS 2 标准)
+# 6. 安装与导出规则 (标准 ROS 2 规范)
 # -----------------------------------------------------------------------------
-# 安装二进制可执行文件与核心库
-install(TARGETS Stereovo_node ${PROJECT_NAME}_lib
+install(TARGETS
+  ${PROJECT_NAME}_lib
+  Stereovo_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
-# 安装 launch 和 config 资源文件
-install(DIRECTORY
-  launch
-  config
-  rviz2
+install(DIRECTORY launch config rviz2
   DESTINATION share/${PROJECT_NAME}
 )
 

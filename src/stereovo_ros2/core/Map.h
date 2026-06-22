@@ -4,10 +4,11 @@
 #include <vector>
 #include <memory>
 #include <mutex>
-#include "MapPoint.h"
-#include "KeyFrame.h" // 引入新写好的关键帧类
+#include "core/MapPoint.h"
+#include "core/KeyFrame.h" // 引入新写好的关键帧类
 
-class Map {
+class Map
+{
 public:
     Map();
     ~Map() = default;

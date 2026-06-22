@@ -25,9 +25,9 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
-#include "Tracking.h"
-#include "Map.h"
-#include "Parameters.h"
+#include "core/Tracking.h"
+#include "core/Map.h"
+#include "utils/Parameters.h"
 #include <fstream>
 class StereoVONode
 {

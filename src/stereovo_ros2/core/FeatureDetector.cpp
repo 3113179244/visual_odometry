@@ -1,6 +1,6 @@
-#include "FeatureDetector.h"
-#include "MapPoint.h"
-#include "Map.h"
+#include "core/FeatureDetector.h"
+#include "core/MapPoint.h"
+#include "core/Map.h"
 #include <opencv2/core/eigen.hpp>
 #include <algorithm>
 
@@ -278,12 +278,14 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
     // 【优化一：全局容量提前熔断】
     // 如果当前光流追踪保留下来的老特征点数量已经达到了设定上限，直接收工，不再浪费算力
     // =========================================================================
-    if ((int)mvCurPts.size() >= mMaxCnt) {
+    if ((int)mvCurPts.size() >= mMaxCnt)
+    {
         return;
     }
 
     // 首帧冷启动或图像尺寸极端变更时的安全防御
-    if (mMask.empty() || mMask.rows != img.rows || mMask.cols != img.cols) {
+    if (mMask.empty() || mMask.rows != img.rows || mMask.cols != img.cols)
+    {
         mMask = cv::Mat(img.rows, img.cols, CV_8UC1, cv::Scalar(255));
     }
 
@@ -307,86 +309,99 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
 
     // =========================================================================
     // 【优化三：向上取整扩容算法】
-    // 使用开销极低的位算公式实现向上取整：(A + B - 1) / B 
+    // 使用开销极低的位算公式实现向上取整：(A + B - 1) / B
     // 确保总网格容量能完美覆盖 mMaxCnt（例如 300 点 / 24网格 = 12.5 -> 向上取整为 13）。
     // 宁可让每个网格的理论容量富余，也绝不允许因整型除法向下取整导致总特征点数缩水。
     // =========================================================================
     int total_grids = GRID_ROWS * GRID_COLS;
     int max_per_grid = (mMaxCnt + total_grids - 1) / total_grids;
-    if (max_per_grid < 1) max_per_grid = 1;
+    if (max_per_grid < 1)
+        max_per_grid = 1;
 
     // 1. 统计当前留在各个自适应网格内的已有特征点数量
     std::vector<std::vector<int>> grid_counts(GRID_ROWS, std::vector<int>(GRID_COLS, 0));
-    for (const auto &pt : mvCurPts) {
+    for (const auto &pt : mvCurPts)
+    {
         int c = static_cast<int>(pt.x / grid_width);
         int r = static_cast<int>(pt.y / grid_height);
-        
+
         // 极值边界越界防御
-        if (c >= GRID_COLS) c = GRID_COLS - 1;
-        if (r >= GRID_ROWS) r = GRID_ROWS - 1;
-        if (c >= 0 && r >= 0) {
+        if (c >= GRID_COLS)
+            c = GRID_COLS - 1;
+        if (r >= GRID_ROWS)
+            r = GRID_ROWS - 1;
+        if (c >= 0 && r >= 0)
+        {
             grid_counts[r][c]++;
         }
     }
-    
+
     // 2. 逐个网格进行局域内精准补充特征
-    for (int r = 0; r < GRID_ROWS; ++r) {
-        for (int c = 0; c < GRID_COLS; ++c) {
-            
+    for (int r = 0; r < GRID_ROWS; ++r)
+    {
+        for (int c = 0; c < GRID_COLS; ++c)
+        {
+
             // =========================================================================
             // 【优化四：双重锁定与全局缺口控制】
             // 在扫描每个网格前，动态计算当前全局还差多少个点。
             // 即使局部网格内部很不饱和，它本次能补充的数量也绝对不能越界超过全局总缺口。
             // =========================================================================
             int global_needed = mMaxCnt - (int)mvCurPts.size();
-            if (global_needed <= 0) {
+            if (global_needed <= 0)
+            {
                 return; // 全局已经攒够了所需的特征点（如 300个），直接退出大循环
             }
-            
+
             int needed = max_per_grid - grid_counts[r][c];
             needed = std::min(needed, global_needed); // 双重锁定，取二者极小值
-            if (needed <= 0) {
+            if (needed <= 0)
+            {
                 continue; // 当前网格已饱满，跳过
             }
-            
+
             // 计算当前自适应网格在大图中的物理感兴趣区域（ROI），并处理右侧及下边界余数
             int x = c * grid_width;
             int y = r * grid_height;
             int w = (c == GRID_COLS - 1) ? (width - x) : grid_width;
             int h = (r == GRID_ROWS - 1) ? (height - y) : grid_height;
-            
+
             cv::Rect roi(x, y, w, h);
             cv::Mat sub_img = img(roi);
             cv::Mat sub_mask = mMask(roi); // 裁剪共享子掩码块，完美继承已有老点的全局抑制圈
-            
+
             std::vector<cv::Point2f> nPts;
             // 仅仅在局部网格块内提点，耗时极低
             cv::goodFeaturesToTrack(sub_img, nPts, needed, 0.01, mMinDist, sub_mask);
-            
-            if (!nPts.empty()) {
+
+            if (!nPts.empty())
+            {
                 // 3. 执行局域亚像素级精度细化
                 cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER + cv::TermCriteria::EPS, 30, 0.01);
                 cv::cornerSubPix(sub_img, nPts, cv::Size(5, 5), cv::Size(-1, -1), criteria);
-                
+
                 // 4. 将子图像局部坐标还原为全局大图坐标并收集
-                for (const auto &pt : nPts) {
+                for (const auto &pt : nPts)
+                {
                     cv::Point2f global_pt(pt.x + x, pt.y + y);
-                    
-                    if (mMask.at<uchar>(global_pt) == 255) {
+
+                    if (mMask.at<uchar>(global_pt) == 255)
+                    {
                         mvCurPts.push_back(global_pt);
                         mvIds.push_back(mNextId++);
                         mvTrackCnt.push_back(1);
-                        
+
                         // 实时在全局大掩码上刷圈，防御同网格内后续点或相邻网格提点时靠得太近
                         cv::circle(mMask, global_pt, mMinDist, 0, -1);
-                        
+
                         // =========================================================================
                         // 【优化五：单点压入实时熔断】
                         // 随着特征点一个一个压入，一旦在循环内部某一刻刚好顶满了设定的总点数上限，
                         // 瞬间熔断终止所有程序，防止后面的网格继续超量提取，精确控制特征点总量。
                         // =========================================================================
-                        if ((int)mvCurPts.size() >= mMaxCnt) {
-                            return; 
+                        if ((int)mvCurPts.size() >= mMaxCnt)
+                        {
+                            return;
                         }
                     }
                 }

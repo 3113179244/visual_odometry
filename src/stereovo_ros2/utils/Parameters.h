@@ -6,10 +6,11 @@
 #include <Eigen/Core>
 
 // 声明全局静态参数，方便任何其他文件直接包含并使用
-class Parameters {
+class Parameters
+{
 public:
     // 读取主函数，传入 kitti_config04-12.yaml 的绝对路径
-    static void readParameters(const std::string& config_file);
+    static void readParameters(const std::string &config_file);
 
     // 基础参数
     static int IMU;

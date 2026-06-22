@@ -3,9 +3,10 @@
 
 #include <memory>
 #include <vector>
-#include "Map.h"
+#include "core/Map.h"
 
-class Optimizer {
+class Optimizer
+{
 public:
     Optimizer() = default;
     ~Optimizer() = default;

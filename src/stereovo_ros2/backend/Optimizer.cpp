@@ -1,7 +1,7 @@
-#include "Optimizer.h"      // 引入优化器类的头文件，包含局部 BA 函数的静态接口声明
-#include "KeyFrame.h"       // 引入关键帧类的头文件，用于获取滑窗内各关键帧的测量值与位姿
-#include "MapPoint.h"       // 引入地图点类的头文件，用于读取及精调三维空间路标点的坐标
-#include "Parameters.h"     // 引入全局参数类的头文件，主要用于在优化中提取相机内参
+#include "backend/Optimizer.h"      // 引入本类声明
+#include "core/KeyFrame.h"          // 跨模块：引入前端关键帧
+#include "core/MapPoint.h"          // 跨模块：引入前端地图点
+#include "utils/Parameters.h"       // 跨模块：引入工具层参数
 #include <ceres/ceres.h>    // 引入谷歌 Ceres Solver 非线性最小二乘求解器的核心头文件
 #include <ceres/rotation.h> // 引入 Ceres 的旋转数学库，提供流形四元数对三维点旋转的方法
 #include <Eigen/Core>       // 引入 Eigen 矩阵基础库，用于三维空间向量的核心数学运算

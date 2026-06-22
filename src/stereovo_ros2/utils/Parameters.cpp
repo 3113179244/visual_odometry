@@ -43,9 +43,11 @@ double Parameters::G_NORM = 0.0;
 int Parameters::ESTIMATE_TD = 0;
 double Parameters::TD = 0.0;
 
-void Parameters::readParameters(const std::string& config_file) {
+void Parameters::readParameters(const std::string &config_file)
+{
     cv::FileStorage fs(config_file, cv::FileStorage::READ);
-    if (!fs.isOpened()) {
+    if (!fs.isOpened())
+    {
         std::cerr << "错误：无法打开主配置文件: " << config_file << std::endl;
         return;
     }
@@ -63,13 +65,14 @@ void Parameters::readParameters(const std::string& config_file) {
     // 2. 嵌套读取相机内参文件
     std::string cam0_calib, cam1_calib;
     fs["cam0_calib"] >> cam0_calib;
-    
+
     // 获取主配置文件的当前所在目录路径，以便拼接相对路径
     std::string config_dir = config_file.substr(0, config_file.find_last_of("/\\") + 1);
     std::string cam0_path = config_dir + cam0_calib;
 
     cv::FileStorage fs_cam(cam0_path, cv::FileStorage::READ);
-    if (fs_cam.isOpened()) {
+    if (fs_cam.isOpened())
+    {
         fs_cam["projection_parameters"]["fx"] >> fx;
         fs_cam["projection_parameters"]["fy"] >> fy;
         fs_cam["projection_parameters"]["cx"] >> cx;
@@ -80,7 +83,9 @@ void Parameters::readParameters(const std::string& config_file) {
         fs_cam["distortion_parameters"]["p1"] >> p1;
         fs_cam["distortion_parameters"]["p2"] >> p2;
         fs_cam.release();
-    } else {
+    }
+    else
+    {
         std::cerr << "警告：无法打开相机内参文件: " << cam0_path << " 将使用默认内参0。" << std::endl;
     }
 
@@ -89,8 +94,10 @@ void Parameters::readParameters(const std::string& config_file) {
     fs["body_T_cam0"] >> cv_T0;
     fs["body_T_cam1"] >> cv_T1;
 
-    for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r)
+    {
+        for (int c = 0; c < 4; ++c)
+        {
             body_T_cam0(r, c) = cv_T0.at<double>(r, c);
             body_T_cam1(r, c) = cv_T1.at<double>(r, c);
         }
