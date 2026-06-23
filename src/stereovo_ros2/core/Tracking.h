@@ -12,6 +12,8 @@
 #include <thread>
 #include <condition_variable>
 #include <functional>
+#include "yolo/yolo_seg_detector.h"
+
 class Map;
 class MapPoint;
 class FeatureDetector;
@@ -19,7 +21,6 @@ class FeatureDetector;
 class Tracking
 {
 public:
-    // 回调函数类型定义
     using RenderCallback = std::function<void(
         double timestamp,
         const cv::Mat &feat_img,
@@ -38,25 +39,20 @@ public:
     void FeedStereoImages(const cv::Mat &imLeft, const cv::Mat &imRight, double timestamp);
 
 private:
-    // 线程 1：前端主处理线程
     void TrackLoop();
 
-    // 前端核心物理计算管道（与 .cpp 完全对齐）
     Eigen::Isometry3d ProcessStereo(const cv::Mat &imLeft, const cv::Mat &imRight,
                                     const double &timestamp, cv::Mat &imgTrack,
                                     std::vector<Eigen::Vector3d> &vWorldPoints,
                                     std::vector<Eigen::Vector3d> &vKFPositions);
 
     bool NeedNewKeyFrame();
-
-    // 【新增】线程 2：后端 Ceres 优化常驻后台线程
     void BackendLoop();
 
 private:
     bool mIsInitialized;
     cv::Mat mPrevImg;
-
-    // 核心解耦组件
+    std::unique_ptr<YoloSegDetector> mpYoloDetector;
     std::unique_ptr<FeatureDetector> mpFeatureDetector;
     std::shared_ptr<Map> mpMap;
     std::map<int, std::shared_ptr<MapPoint>> mmIDToMapPoint;
@@ -64,7 +60,6 @@ private:
     unsigned long mNextKFId;
     Eigen::Isometry3d mCurrentPose;
 
-    // 前端同步双输入缓存队列
     std::thread mTrackThread;
     bool mIsRunning;
     std::mutex mMutexBuf;
@@ -76,7 +71,6 @@ private:
 
     RenderCallback mRenderCb;
 
-    // 本地化安全参数缓存
     bool mFlowBack;
     double mFx, mFy, mCx, mCy;
     double mK1, mK2, mP1, mP2;
@@ -84,9 +78,7 @@ private:
     Eigen::Matrix4d mBodyTCam0;
     Eigen::Matrix4d mBodyTCam1;
     double mPrevTime;
-    // ==========================================
-    // 后端异步 Ceres 优化控制信号
-    // ==========================================
+
     std::thread mBackendThread;
     std::mutex mMutexBackend;
     std::condition_variable mCondBackend;

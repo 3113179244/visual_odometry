@@ -1,12 +1,21 @@
 cmake_minimum_required(VERSION 3.8)
 project(stereovo_ros2)
 
+# -----------------------------------------------------------------------------
+# 0. 启用 C++ 和 CUDA 支持
+# -----------------------------------------------------------------------------
+enable_language(CUDA)
+
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 14) 
 endif()
 
-add_compile_options(-Wextra -Wpedantic)
+add_compile_options(-Wextra -Wpedantic -w)
 set(CMAKE_BUILD_TYPE Release)
+
+set(YOLOV8_CODE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tensorrtx/yolov8")
+
+set(CMAKE_CUDA_ARCHITECTURES "86")
 
 # -----------------------------------------------------------------------------
 # 1. 寻找 ROS 2 官方依赖包
@@ -32,43 +41,51 @@ find_package(Ceres REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 # -----------------------------------------------------------------------------
-# 3. 头文件包含路径 (灵魂改动：将当前包根目录加入搜寻，支持 "core/xxx.h" 导入)
+# 3. 头文件包含路径
 # -----------------------------------------------------------------------------
 include_directories(
   include
-  ${CMAKE_CURRENT_SOURCE_DIR}   # 允许编译器从当前功能包根目录下寻找子文件夹
+  ${CMAKE_CURRENT_SOURCE_DIR}   
   ${OpenCV_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
   ${CERES_INCLUDE_DIRS}
+  /usr/local/TensorRT/include
+  ${YOLOV8_CODE_DIR}/include     
+  ${YOLOV8_CODE_DIR}/plugin      
 )
 
+link_directories(/usr/local/TensorRT/lib)
+
 # -----------------------------------------------------------------------------
-# 4. 创建纯 C++ SLAM 核心算法库 (方案 B 目录结构)
+# 4. 创建纯 C++ SLAM 核心算法库
 # -----------------------------------------------------------------------------
 add_library(${PROJECT_NAME}_lib
   # 基础与工具模块
   utils/Camera.cpp
   utils/Parameters.cpp
-
-  # 前端核心模块
   core/FeatureDetector.cpp
   core/Frame.cpp
   core/KeyFrame.cpp
   core/Tracking.cpp
   core/Map.cpp
   core/MapPoint.cpp
-
-  # 后端优化模块
   backend/Optimizer.cpp
+  yolo/yolo_seg_detector.cpp
+  ${YOLOV8_CODE_DIR}/src/model.cpp
+  ${YOLOV8_CODE_DIR}/src/preprocess.cu
+  ${YOLOV8_CODE_DIR}/src/postprocess.cpp
+  ${YOLOV8_CODE_DIR}/plugin/yololayer.cu
 )
 
-# 链接第三方数学库
+# 链接第三方数学库与 TensorRT 核心库
 target_link_libraries(${PROJECT_NAME}_lib 
   ${OpenCV_LIBS} 
   ${CERES_LIBRARIES} 
+  nvinfer                      
+  cudart                       
 )
 
-# 链接 ROS 2 依赖组件到算法库
+# 链接 ROS 2 依赖组件
 ament_target_dependencies(${PROJECT_NAME}_lib
   rclcpp 
   rcpputils 
@@ -84,14 +101,12 @@ ament_target_dependencies(${PROJECT_NAME}_lib
 )
 
 # -----------------------------------------------------------------------------
-# 5. 创建 ROS 2 可执行节点主入口 (保留在原 src/ 目录下)
+# 5. 创建 ROS 2 可执行节点主入口
 # -----------------------------------------------------------------------------
 add_executable(Stereovo_node src/Stereovo_node.cpp)
 
-# 链接内部核心算法库
 target_link_libraries(Stereovo_node ${PROJECT_NAME}_lib) 
 
-# 链接节点所需的 ROS 2 属性
 ament_target_dependencies(Stereovo_node
   rclcpp 
   rcpputils 
@@ -107,7 +122,7 @@ ament_target_dependencies(Stereovo_node
 )
 
 # -----------------------------------------------------------------------------
-# 6. 安装与导出规则 (标准 ROS 2 规范)
+# 6. 安装与导出规则
 # -----------------------------------------------------------------------------
 install(TARGETS
   ${PROJECT_NAME}_lib
