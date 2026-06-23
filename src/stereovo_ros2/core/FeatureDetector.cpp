@@ -1,8 +1,10 @@
 #include "core/FeatureDetector.h"
 #include "core/MapPoint.h"
 #include "core/Map.h"
+#include "utils/Parameters.h"      // 【新增包含】引入全局参数，以便使用 F_THRESHOLD
 #include <opencv2/core/eigen.hpp>
 #include <algorithm>
+#include <cmath>
 
 FeatureDetector::FeatureDetector(int maxCnt, int minDist, bool flowBack)
     : mMaxCnt(maxCnt), mMinDist(minDist), mFlowBack(flowBack), mNextId(0) {}
@@ -34,20 +36,55 @@ void FeatureDetector::TrackFeaturesLK(const cv::Mat &prevImg, const cv::Mat &cur
         }
     }
 
-    mvCurPts.clear();
-    std::vector<int> keepIds;
-    std::vector<int> keepTrackCnt;
+    // --- 临时容器：收集通过基础光流筛选的点对 ---
+    std::vector<cv::Point2f> tmpPrevPts, tmpCurPts;
+    std::vector<int> tmpIds;
+    std::vector<int> tmpTrackCnt;
+
     for (size_t i = 0; i < status.size(); i++)
     {
         if (status[i] && InBorder(currPts[i], currImg.cols, currImg.rows))
         {
-            mvCurPts.push_back(currPts[i]);
-            keepIds.push_back(mvIds[i]);
-            keepTrackCnt.push_back(mvTrackCnt[i]);
+            tmpPrevPts.push_back(mvPrevPts[i]);
+            tmpCurPts.push_back(currPts[i]);
+            tmpIds.push_back(mvIds[i]);
+            tmpTrackCnt.push_back(mvTrackCnt[i]);
         }
     }
-    mvIds = keepIds;
-    mvTrackCnt = keepTrackCnt;
+
+    // =========================================================================
+    // 【新增防线一】时间域对极约束剔除误匹配 (Temporal Epipolar RANSAC Check)
+    // 作用：利用前后两帧之间的 2D-2D 约束，估计基础矩阵 F 并执行 RANSAC 清洗。
+    // 激活了 YAML 配置文件中的 Parameters::F_THRESHOLD 属性 (默认为 1.0 像素误差)
+    // =========================================================================
+    mvCurPts.clear();
+    mvIds.clear();
+    mvTrackCnt.clear();
+
+    if (tmpCurPts.size() >= 8) // 计算基础矩阵 F 至少需要 8 个点对
+    {
+        std::vector<uchar> fStatus;
+        // 调用 OpenCV 利用对极残差剔除偏离刚体运动的误匹配
+        cv::findFundamentalMat(tmpPrevPts, tmpCurPts, cv::FM_RANSAC, Parameters::F_THRESHOLD, 0.99, fStatus);
+
+        for (size_t i = 0; i < fStatus.size(); i++)
+        {
+            if (fStatus[i]) // 仅保留符合对极约束的内点 (Inliers)
+            {
+                mvCurPts.push_back(tmpCurPts[i]);
+                mvIds.push_back(tmpIds[i]);
+                mvTrackCnt.push_back(tmpTrackCnt[i]);
+            }
+        }
+    }
+    else
+    {
+        // 极端防护：如果追踪点数严重不足，降级保留光流原生结果防止系统直接死锁
+        mvCurPts = tmpCurPts;
+        mvIds = tmpIds;
+        mvTrackCnt = tmpTrackCnt;
+    }
+    // =========================================================================
 
     for (auto &n : mvTrackCnt)
         n++;
@@ -79,7 +116,7 @@ bool FeatureDetector::EstimatePosePnP(
         }
     }
 
-    if (objectPoints.size() < 5)
+    if (objectPoints.size() < 4) // solvePnPRansac 鲁棒要求
         return false;
 
     cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
@@ -101,9 +138,7 @@ bool FeatureDetector::EstimatePosePnP(
         currentPose.linear() = eigen_R;
         currentPose.translation() = eigen_t;
 
-        std::vector<bool> isInlier(mvCurPts.size(), true);
-        for (size_t k = 0; k < pnpFeatureIndices.size(); ++k)
-            isInlier[pnpFeatureIndices[k]] = false;
+        std::vector<bool> isInlier(mvCurPts.size(), false);
         for (int idx : inliers)
             isInlier[pnpFeatureIndices[idx]] = true;
 
@@ -112,7 +147,8 @@ bool FeatureDetector::EstimatePosePnP(
         std::vector<int> compressedTrackCnt;
         for (size_t k = 0; k < mvCurPts.size(); ++k)
         {
-            if (isInlier[k])
+            // 只有当该特征点不仅属于 PnP 内点，而且其在 mmIDToMapPoint 里有对应的 3D 点时才保留
+            if (isInlier[k] && mmIDToMapPoint.find(mvIds[k]) != mmIDToMapPoint.end())
             {
                 compressedPts.push_back(mvCurPts[k]);
                 compressedIds.push_back(mvIds[k]);
@@ -140,6 +176,7 @@ void FeatureDetector::TriangulateNewPoints(
     const Eigen::Isometry3d &currentPose,
     const Eigen::Matrix4d &bodyTCam0, const Eigen::Matrix4d &bodyTCam1,
     double fx, double fy, double cx, double cy,
+    double k1, double k2, double p1, double p2,
     std::map<int, std::shared_ptr<MapPoint>> &mmIDToMapPoint,
     std::shared_ptr<Map> mpMap, bool isKeyFrame,
     std::vector<Eigen::Vector3d> &vWorldPoints, cv::Mat &imgTrack)
@@ -150,38 +187,53 @@ void FeatureDetector::TriangulateNewPoints(
     std::vector<cv::Point2f> mvRightPts;
     std::vector<uchar> stereoStatus;
     std::vector<float> stereoErr;
-    // 正向匹配：从左图特征点追踪匹配到右图对应位置
     cv::calcOpticalFlowPyrLK(grayLeft, grayRight, mvCurPts, mvRightPts, stereoStatus, stereoErr, cv::Size(21, 21), 3);
 
-    // =========================================================================
-    // 【核心改进二】双目左右目匹配的正反向光流校验（Stereo Forward-Backward Check）
-    // 目的：双目基线处的微小误匹配会引入巨大的深度估计噪声，对三角化点的精度是毁灭性的。
-    // =========================================================================
     if (mFlowBack)
-    {                                                       // 借用配置参数中的 flowback 开关来控制双目反向校验
-        std::vector<cv::Point2f> reverseLeftPts = mvCurPts; // 初始化反向映射存储器
-        std::vector<uchar> reverseStereoStatus;             // 反向状态矩阵
-        // 反向追踪：从右图的预测匹配点逆向追踪回左图
+    {
+        std::vector<cv::Point2f> reverseLeftPts = mvCurPts;
+        std::vector<uchar> reverseStereoStatus;
         cv::calcOpticalFlowPyrLK(grayRight, grayLeft, mvRightPts, reverseLeftPts, reverseStereoStatus, stereoErr, cv::Size(21, 21), 3);
 
         for (size_t i = 0; i < stereoStatus.size(); i++)
         {
             if (stereoStatus[i] && reverseStereoStatus[i])
             {
-                // 如果正向追踪出去再反向追踪回来的欧氏距离像素残差大于 0.5 像素，说明发生了滑移错位，强制剔除！
                 if (Distance(mvCurPts[i], reverseLeftPts[i]) > 0.5)
-                {
                     stereoStatus[i] = 0;
-                }
             }
             else
+                stereoStatus[i] = 0;
+        }
+    }
+
+    // =========================================================================
+    // 【新增防线二】双目极线约束剔除误匹配 (Stereo Horizontal Epipolar Line Check)
+    // 作用：利用双目校正几何原理。左图点与右图匹配点的像素 Y 坐标理论上必须完全一致。
+    // 经验阈值：由于光流存在细微亚像素漂移，设定 1.5 像素的垂直容忍带，能完美隔绝沿基线上下方向的跨行误匹配。
+    // =========================================================================
+    for (size_t i = 0; i < stereoStatus.size(); i++)
+    {
+        if (stereoStatus[i])
+        {
+            if (std::abs(mvCurPts[i].y - mvRightPts[i].y) > 1.5)
             {
-                stereoStatus[i] = 0; // 单边丢失的点直接扔掉
+                stereoStatus[i] = 0; // 强制剪枝垂直偏离极线的坏点
             }
         }
     }
     // =========================================================================
-
+    std::vector<cv::Point2f> mvCurPtsUn = mvCurPts;
+    std::vector<cv::Point2f> mvRightPtsUn = mvRightPts;
+    
+    if (k1 != 0.0 || k2 != 0.0 || p1 != 0.0 || p2 != 0.0) // 仅当存在非零畸变参数时才激活计算
+    {
+        cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
+        cv::Mat distCoeffs = (cv::Mat_<double>(4, 1) << k1, k2, p1, p2);
+        cv::undistortPoints(mvCurPts, mvCurPtsUn, cameraMatrix, distCoeffs, cv::Mat(), cameraMatrix);
+        cv::undistortPoints(mvRightPts, mvRightPtsUn, cameraMatrix, distCoeffs, cv::Mat(), cameraMatrix);
+    }
+    
     Eigen::Matrix4d T_w_body = currentPose.inverse().matrix();
     Eigen::Matrix4d T_w_c0 = T_w_body * bodyTCam0;
     Eigen::Matrix4d T_w_c1 = T_w_body * bodyTCam1;
@@ -200,7 +252,6 @@ void FeatureDetector::TriangulateNewPoints(
     {
         if (stereoStatus[i] && InBorder(mvRightPts[i], grayRight.cols, grayRight.rows))
         {
-
             cv::Point2f ptRight = mvRightPts[i];
             ptRight.x += grayLeft.cols;
             cv::circle(imgTrack, ptRight, 2, cv::Scalar(0, 255, 0), 2);
@@ -274,16 +325,11 @@ void FeatureDetector::SetMask(int rows, int cols)
 
 void FeatureDetector::AddNewFeatures(const cv::Mat &img)
 {
-    // =========================================================================
-    // 【优化一：全局容量提前熔断】
-    // 如果当前光流追踪保留下来的老特征点数量已经达到了设定上限，直接收工，不再浪费算力
-    // =========================================================================
     if ((int)mvCurPts.size() >= mMaxCnt)
     {
         return;
     }
 
-    // 首帧冷启动或图像尺寸极端变更时的安全防御
     if (mMask.empty() || mMask.rows != img.rows || mMask.cols != img.cols)
     {
         mMask = cv::Mat(img.rows, img.cols, CV_8UC1, cv::Scalar(255));
@@ -292,12 +338,6 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
     int width = img.cols;
     int height = img.rows;
 
-    // =========================================================================
-    // 【优化二：完全自适应物理网格划分】
-    // 工业级经验值：设定单个网格的理想物理尺寸目标为 150x150 像素。
-    // 这样无论以后换成 VGA(640x480)、720P、1080P 还是 KITTI 图像，
-    // 算法都能全自动推导出最匹配当前视场的行、列等分比例（至少划分为 2x2 网格）。
-    // =========================================================================
     const int GRID_WIDTH_TARGET = 150;
     const int GRID_HEIGHT_TARGET = 150;
 
@@ -307,60 +347,42 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
     int grid_width = width / GRID_COLS;
     int grid_height = height / GRID_ROWS;
 
-    // =========================================================================
-    // 【优化三：向上取整扩容算法】
-    // 使用开销极低的位算公式实现向上取整：(A + B - 1) / B
-    // 确保总网格容量能完美覆盖 mMaxCnt（例如 300 点 / 24网格 = 12.5 -> 向上取整为 13）。
-    // 宁可让每个网格的理论容量富余，也绝不允许因整型除法向下取整导致总特征点数缩水。
-    // =========================================================================
     int total_grids = GRID_ROWS * GRID_COLS;
     int max_per_grid = (mMaxCnt + total_grids - 1) / total_grids;
     if (max_per_grid < 1)
         max_per_grid = 1;
 
-    // 1. 统计当前留在各个自适应网格内的已有特征点数量
     std::vector<std::vector<int>> grid_counts(GRID_ROWS, std::vector<int>(GRID_COLS, 0));
     for (const auto &pt : mvCurPts)
     {
         int c = static_cast<int>(pt.x / grid_width);
         int r = static_cast<int>(pt.y / grid_height);
 
-        // 极值边界越界防御
-        if (c >= GRID_COLS)
-            c = GRID_COLS - 1;
-        if (r >= GRID_ROWS)
-            r = GRID_ROWS - 1;
+        if (c >= GRID_COLS) c = GRID_COLS - 1;
+        if (r >= GRID_ROWS) r = GRID_ROWS - 1;
         if (c >= 0 && r >= 0)
         {
             grid_counts[r][c]++;
         }
     }
 
-    // 2. 逐个网格进行局域内精准补充特征
     for (int r = 0; r < GRID_ROWS; ++r)
     {
         for (int c = 0; c < GRID_COLS; ++c)
         {
-
-            // =========================================================================
-            // 【优化四：双重锁定与全局缺口控制】
-            // 在扫描每个网格前，动态计算当前全局还差多少个点。
-            // 即使局部网格内部很不饱和，它本次能补充的数量也绝对不能越界超过全局总缺口。
-            // =========================================================================
             int global_needed = mMaxCnt - (int)mvCurPts.size();
             if (global_needed <= 0)
             {
-                return; // 全局已经攒够了所需的特征点（如 300个），直接退出大循环
+                return;
             }
 
             int needed = max_per_grid - grid_counts[r][c];
-            needed = std::min(needed, global_needed); // 双重锁定，取二者极小值
+            needed = std::min(needed, global_needed);
             if (needed <= 0)
             {
-                continue; // 当前网格已饱满，跳过
+                continue;
             }
 
-            // 计算当前自适应网格在大图中的物理感兴趣区域（ROI），并处理右侧及下边界余数
             int x = c * grid_width;
             int y = r * grid_height;
             int w = (c == GRID_COLS - 1) ? (width - x) : grid_width;
@@ -368,19 +390,16 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
 
             cv::Rect roi(x, y, w, h);
             cv::Mat sub_img = img(roi);
-            cv::Mat sub_mask = mMask(roi); // 裁剪共享子掩码块，完美继承已有老点的全局抑制圈
+            cv::Mat sub_mask = mMask(roi);
 
             std::vector<cv::Point2f> nPts;
-            // 仅仅在局部网格块内提点，耗时极低
             cv::goodFeaturesToTrack(sub_img, nPts, needed, 0.01, mMinDist, sub_mask);
 
             if (!nPts.empty())
             {
-                // 3. 执行局域亚像素级精度细化
                 cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER + cv::TermCriteria::EPS, 30, 0.01);
                 cv::cornerSubPix(sub_img, nPts, cv::Size(5, 5), cv::Size(-1, -1), criteria);
 
-                // 4. 将子图像局部坐标还原为全局大图坐标并收集
                 for (const auto &pt : nPts)
                 {
                     cv::Point2f global_pt(pt.x + x, pt.y + y);
@@ -391,14 +410,8 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
                         mvIds.push_back(mNextId++);
                         mvTrackCnt.push_back(1);
 
-                        // 实时在全局大掩码上刷圈，防御同网格内后续点或相邻网格提点时靠得太近
                         cv::circle(mMask, global_pt, mMinDist, 0, -1);
 
-                        // =========================================================================
-                        // 【优化五：单点压入实时熔断】
-                        // 随着特征点一个一个压入，一旦在循环内部某一刻刚好顶满了设定的总点数上限，
-                        // 瞬间熔断终止所有程序，防止后面的网格继续超量提取，精确控制特征点总量。
-                        // =========================================================================
                         if ((int)mvCurPts.size() >= mMaxCnt)
                         {
                             return;

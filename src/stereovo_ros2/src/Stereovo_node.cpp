@@ -46,7 +46,7 @@ public:
                       std::placeholders::_1, std::placeholders::_2,
                       std::placeholders::_3, std::placeholders::_4,
                       std::placeholders::_5, std::placeholders::_6,
-                      std::placeholders::_7));
+                      std::placeholders::_7, std::placeholders::_8));
 
         pub_latest_odometry_ = node_->create_publisher<nav_msgs::msg::Odometry>("imu_propagate", 1000);
         pub_odometry_ = node_->create_publisher<nav_msgs::msg::Odometry>("odometry", 1000);
@@ -419,6 +419,7 @@ private:
     void PublishFeatures(const std_msgs::msg::Header &header,
                          const std::vector<cv::Point2f> &curPts,
                          const std::vector<int> &ids,
+                         const std::vector<cv::Point2f> &ptsVel,
                          int camera_id = 0)
     {
         if (curPts.empty())
@@ -454,8 +455,8 @@ private:
             cam_ch.values.push_back(static_cast<float>(camera_id));
             u_ch.values.push_back(static_cast<float>(curPts[i].x));
             v_ch.values.push_back(static_cast<float>(curPts[i].y));
-            vx_ch.values.push_back(0.0f);
-            vy_ch.values.push_back(0.0f);
+            vx_ch.values.push_back(ptsVel[i].x);
+            vy_ch.values.push_back(ptsVel[i].y);
         }
 
         feature_msg.channels.push_back(id_ch);
@@ -500,7 +501,9 @@ private:
                             const std::vector<Eigen::Vector3d> &vKFPositions,
                             const Eigen::Isometry3d &Tcw,
                             const std::vector<cv::Point2f> &curPts,
-                            const std::vector<int> &ids)
+                            const std::vector<int> &ids,
+                            const std::vector<cv::Point2f> &ptsVel
+                        )
     {
         std_msgs::msg::Header header;
         header.frame_id = "world";
@@ -532,7 +535,7 @@ private:
         PublishPointCloud(header, vWorldPoints);
         PublishKeyPoses(header, vKFPositions);
         PublishTrackImage(feat_img, timestamp);
-        PublishFeatures(header, curPts, ids, 0);
+        PublishFeatures(header, curPts, ids, ptsVel, 0);
     }
 
 private:

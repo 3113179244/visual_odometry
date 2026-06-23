@@ -9,7 +9,7 @@
 
 // Tracking 类的构造函数：传入地图指针并初始化相关多线程和参数
 Tracking::Tracking(std::shared_ptr<Map> pMap)
-    : mpMap(pMap), mIsInitialized(false), mIsRunning(true), mNeedOptimize(false), mNextKFId(0) // 初始化列表：绑定地图，设置未初始化状态，置运行标志为真，不激活BA优化，关键帧计数归零
+    : mpMap(pMap), mIsInitialized(false), mIsRunning(true), mNeedOptimize(false), mNextKFId(0), mPrevTime(0.0) // 初始化列表：绑定地图，设置未初始化状态，置运行标志为真，不激活BA优化，关键帧计数归零
 {                                                                                              // 构造函数主体开始
     // 对全局静态参数做一次性深拷贝到本地变量，彻底杜绝多线程并发时的内存读写数据竞争
     mFlowBack = (Parameters::FLOW_BACK != 0);          // 拷贝是否开启双向反向光流校验的布尔开关
@@ -99,8 +99,8 @@ void Tracking::TrackLoop()
 
         if (mRenderCb && !feat_img.empty())                                   // 如果外层 ROS 2 节点成功注册了回调函数且可视化渲染图不为空
         {                                                                     // 回调调用主体开始
-            mRenderCb(timestamp, feat_img, vWorldPoints, vKFPositions, Tcw,   // 触发回调：将解算出的时间戳、图像、点云、轨迹和位姿一并塞给 ROS 2 节点进行发布
-                      mpFeatureDetector->mvCurPts, mpFeatureDetector->mvIds); // 顺便附带上当前激活特征点的像素坐标与全局唯一特征 ID
+            mRenderCb(timestamp, feat_img, vWorldPoints, vKFPositions, Tcw,   // 触发回调
+                      mpFeatureDetector->mvCurPts, mpFeatureDetector->mvIds, mpFeatureDetector->mvPtsVel); // 顺便附带上当前激活特征点的像素坐标与全局唯一特征 ID
         } // 回调调用主体结束
     } // 循环体结束
 } // 函数结束
@@ -117,6 +117,10 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     cv::Mat grayRight = imRight;                              // 声明并浅拷贝输入的右目图像到局部变量
     if (imRight.channels() == 3)                              // 校验右目图像通道数，如果是 BGR 三通道彩色图
         cv::cvtColor(imRight, grayRight, cv::COLOR_BGR2GRAY); // 调用 OpenCV 将右目转换为单通道灰度图
+
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+    clahe->apply(grayLeft, grayLeft);     // 对左目灰度图应用 CLAHE
+    clahe->apply(grayRight, grayRight);   // 对右目灰度图应用 CLAHE
 
     // 绘制准备工作：为了在一个窗口同时显示双目追踪画面，需要横向拼接左右目画面
     cv::Mat imgLeftBGR, imgRightBGR;                          // 声明两个局部彩图变量，以便在灰度底图上绘制彩色点线
@@ -143,8 +147,9 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         mpFeatureDetector->mvTrackCnt.clear();                                       // 强制清空特征处理器中的各特征点连续追踪帧数计数器
         mmIDToMapPoint.clear();                                                      // 强力清空前端持有的局部路标哈希检索字典
         localPose = Eigen::Isometry3d::Identity();                                   // 将初始帧位姿牢牢锁定并固化为世界绝对坐标原点（单位矩阵）
-
         mpFeatureDetector->AddNewFeatures(grayLeft); // 调用角点提取算法，在初始左目灰度图上提取第一批均匀分布的强特征点
+        mpFeatureDetector->mvPtsVel.resize(mpFeatureDetector->mvCurPts.size(), cv::Point2f(0.0f, 0.0f));
+        mPrevTime = timestamp;                       // 【新增】固化第一帧的时间锚点
         mPrevImg = grayLeft.clone();                 // 将当前的左目灰度图像深拷贝备份，留作下一帧光流追踪的“上一帧底图”
 
         std::map<int, cv::Point2f> initMeasurements;                                        // 声明临时字典，用于打包初始帧的 2D 像素观测
@@ -199,6 +204,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     // 【架构注意】该函数内部如果发现 isKeyFrame == true，会已经自动把新三角化出来的 3D 路标点指针推入了全局地图 mpMap 中
     mpFeatureDetector->TriangulateNewPoints(                                        // 调用自适应多线程双目三角化函数
         grayLeft, grayRight, localPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy, // 传入灰度图、当前位姿、双目机体外参及内参
+        mK1, mK2, mP1, mP2,
         mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);                 // 传入局部字典、全局地图、关键帧开关，用于回填局部点云并渲染拼接大图
 
     // 步长 6：新关键帧固化并触发异步后端 BA 优化
@@ -259,7 +265,24 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         cv::Scalar ptColor = cv::Scalar(255 * (1 - len), 0, 255 * len);            // 寿命短点表现为鲜艳红，长寿稳定的老特征表现为高亮蓝
         cv::circle(imgTrack, mpFeatureDetector->mvCurPts[i], 2, ptColor, 2);       // 再次用 OpenCV 将这些实时点画在双目拼接大图的左半侧
     } // 特征画圈循环结束
-
+    mpFeatureDetector->mvPtsVel.assign(mpFeatureDetector->mvCurPts.size(), cv::Point2f(0.0f, 0.0f));
+    double dt = timestamp - mPrevTime;
+    if (dt > 1e-5) // 极小时间分母防御（防御数据重叠流）
+    {
+        for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
+        {
+            int id = mpFeatureDetector->mvIds[i];
+            auto it = mpFeatureDetector->mInversePrevPtsMap.find(id);
+            if (it != mpFeatureDetector->mInversePrevPtsMap.end())
+            {
+                cv::Point2f pt_prev = it->second;
+                cv::Point2f pt_curr = mpFeatureDetector->mvCurPts[i];
+                mpFeatureDetector->mvPtsVel[i].x = (pt_curr.x - pt_prev.x) / dt;
+                mpFeatureDetector->mvPtsVel[i].y = (pt_curr.y - pt_prev.y) / dt;
+            }
+        }
+    }
+    mPrevTime = timestamp; // 将本帧时间安全更替为下一帧的历史分母基准
     mPrevImg = grayLeft.clone();                       // 将本帧左图完整克隆浅拷贝给历史成员，作为下一轮追踪所需的“上一帧底图”
     mpFeatureDetector->UpdatePreviousStatus(grayLeft); // 同步调用，推动特征追踪器内的状态窗口滚动向前更替
 

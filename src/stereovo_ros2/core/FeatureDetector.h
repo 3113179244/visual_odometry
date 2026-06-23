@@ -33,6 +33,7 @@ public:
         const Eigen::Isometry3d &currentPose,
         const Eigen::Matrix4d &bodyTCam0, const Eigen::Matrix4d &bodyTCam1,
         double fx, double fy, double cx, double cy,
+        double k1, double k2, double p1, double p2,
         std::map<int, std::shared_ptr<MapPoint>> &mmIDToMapPoint,
         std::shared_ptr<Map> mpMap, bool isKeyFrame,
         std::vector<Eigen::Vector3d> &vWorldPoints, cv::Mat &imgTrack);
@@ -54,6 +55,7 @@ public:
     std::vector<cv::Point2f> mvPrevPts;
     std::vector<int> mvIds;
     std::vector<int> mvTrackCnt;
+    std::vector<cv::Point2f> mvPtsVel;
     std::map<int, cv::Point2f> mInversePrevPtsMap;
     cv::Mat mMask;
 

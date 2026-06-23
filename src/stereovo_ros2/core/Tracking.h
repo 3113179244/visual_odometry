@@ -27,7 +27,9 @@ public:
         const std::vector<Eigen::Vector3d> &vKFPositions,
         const Eigen::Isometry3d &Tcw,
         const std::vector<cv::Point2f> &curPts,
-        const std::vector<int> &ids)>;
+        const std::vector<int> &ids,
+        const std::vector<cv::Point2f> &ptsVel
+    )>;
 
     Tracking(std::shared_ptr<Map> pMap);
     ~Tracking();
@@ -81,7 +83,7 @@ private:
     double mKeyframeParallax;
     Eigen::Matrix4d mBodyTCam0;
     Eigen::Matrix4d mBodyTCam1;
-
+    double mPrevTime;
     // ==========================================
     // 后端异步 Ceres 优化控制信号
     // ==========================================
