@@ -70,7 +70,6 @@ add_library(${PROJECT_NAME}_lib
   core/Map.cpp
   core/MapPoint.cpp
   backend/Optimizer.cpp
-  yolo/yolo_seg_detector.cpp
   ${YOLOV8_CODE_DIR}/src/model.cpp
   ${YOLOV8_CODE_DIR}/src/preprocess.cu
   ${YOLOV8_CODE_DIR}/src/postprocess.cpp

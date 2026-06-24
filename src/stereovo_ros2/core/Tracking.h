@@ -12,7 +12,6 @@
 #include <thread>
 #include <condition_variable>
 #include <functional>
-#include "yolo/yolo_seg_detector.h"
 
 class Map;
 class MapPoint;
@@ -52,7 +51,6 @@ private:
 private:
     bool mIsInitialized;
     cv::Mat mPrevImg;
-    std::unique_ptr<YoloSegDetector> mpYoloDetector;
     std::unique_ptr<FeatureDetector> mpFeatureDetector;
     std::shared_ptr<Map> mpMap;
     std::map<int, std::shared_ptr<MapPoint>> mmIDToMapPoint;

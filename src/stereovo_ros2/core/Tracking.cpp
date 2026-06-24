@@ -29,9 +29,6 @@ Tracking::Tracking(std::shared_ptr<Map> pMap)
 
     mTrackThread = std::thread(&Tracking::TrackLoop, this);     
     mBackendThread = std::thread(&Tracking::BackendLoop, this); 
-
-    std::string engine_path = "/home/wzj/tensorrtx/yolov8/build/yolov8n-seg.engine";
-    mpYoloDetector = std::make_unique<YoloSegDetector>(engine_path, "n");
 } 
 
 Tracking::~Tracking()
@@ -164,74 +161,15 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         return localPose; 
     } 
 
-// --- B. 正常帧间状态解算 ---
+    // --- B. 正常帧间状态解算 ---
     // 1. 稀疏光流帧间追踪
     mpFeatureDetector->TrackFeaturesLK(mPrevImg, grayLeft); 
 
-    // 【防护防线一】动态特征点剪枝
-    cv::Mat dynamicMask = mpYoloDetector->GetDynamicMask(imLeft); 
-
-    // 🎯【Debug 窗口】直接弹窗显示 YOLO 吐出的黑白掩码图
-    // 白色区域（255）代表被判定为运动的车/人，黑色（0）代表背景
-    if (!dynamicMask.empty()) {
-        cv::imshow("YOLO_Output_Mask_Debug", dynamicMask);
-        cv::waitKey(1); 
-    }
-
-    int yolo_deleted_points_cnt = 0; // 统计每帧强制抹除了多少个动态点
-
-    if (!mpFeatureDetector->mvCurPts.empty())
-    {
-        std::vector<cv::Point2f> staticCurPts;
-        std::vector<int> staticIds;
-        std::vector<int> staticTrackCnt;
-
-        for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
-        {
-            cv::Point2f pt = mpFeatureDetector->mvCurPts[i];
-            int x = std::min(std::max(0, cvRound(pt.x)), dynamicMask.cols - 1);
-            int y = std::min(std::max(0, cvRound(pt.y)), dynamicMask.rows - 1);
-
-            // 仅保留落在静态背景中的点
-            if (dynamicMask.at<uchar>(y, x) == 0)
-            {
-                staticCurPts.push_back(mpFeatureDetector->mvCurPts[i]);
-                staticIds.push_back(mpFeatureDetector->mvIds[i]);
-                staticTrackCnt.push_back(mpFeatureDetector->mvTrackCnt[i]);
-            }
-            else
-            {
-                // 🎯【Debug 标记】如果该点踩在了车/人身上，在被无情抹除前，
-                // 我们在横向拼接大图（imgTrack）的左侧画面上，强行画一个明显的【大红实心圆圈】！
-                cv::circle(imgTrack, pt, 5, cv::Scalar(0, 0, 255), -1); 
-
-                mmIDToMapPoint.erase(mpFeatureDetector->mvIds[i]);
-                yolo_deleted_points_cnt++; 
-            }
-        }
-        mpFeatureDetector->mvCurPts = staticCurPts;
-        mpFeatureDetector->mvIds = staticIds;
-        mpFeatureDetector->mvTrackCnt = staticTrackCnt;
-    }
-
-    // 🎯【Debug 终端高亮】在终端里高亮打印出这一帧清洗了多少个动态干扰点
-    if (yolo_deleted_points_cnt > 0) {
-        std::cout << "\033[1;31m>>> [YOLO 结界触发] 成功拦截并强制抹除动态特征点数量: " 
-                  << yolo_deleted_points_cnt << " 个！\033[0m" << std::endl;
-    }
-
-    // 2. PnP 求解当前帧初估位姿 (已排除动态点干扰)
+    // 2. PnP 求解当前帧初估位姿
     bool pnp_succ = mpFeatureDetector->EstimatePosePnP(mmIDToMapPoint, mFx, mFy, mCx, mCy, mK1, mK2, mP1, mP2, localPose); 
 
-    // 3. 均匀分布特征圈刷新
+    // 3. 均匀分布特征圈刷新与特征点提取
     mpFeatureDetector->SetMask(grayLeft.rows, grayLeft.cols); 
-
-    // 【防护防线二】新特征提取动态封锁 (车身区域涂黑，禁止在该表面提新特征点)
-    cv::Mat invDynamicMask;
-    cv::bitwise_not(dynamicMask, invDynamicMask); 
-    cv::bitwise_and(mpFeatureDetector->mMask, invDynamicMask, mpFeatureDetector->mMask);
-
-    // 在安全的静态背景区域提取新特征点
     mpFeatureDetector->AddNewFeatures(grayLeft);
 
     // 4. 关键帧判定
