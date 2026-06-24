@@ -1,22 +1,22 @@
-#include "backend/Optimizer.h"      // 引入本类声明
-#include "core/KeyFrame.h"          // 跨模块：引入前端关键帧
-#include "core/MapPoint.h"          // 跨模块：引入前端地图点
-#include "utils/Parameters.h"       // 跨模块：引入工具层参数
-#include <ceres/ceres.h>    // 引入谷歌 Ceres Solver 非线性最小二乘求解器的核心头文件
-#include <ceres/rotation.h> // 引入 Ceres 的旋转数学库
-#include <Eigen/Core>       // 引入 Eigen 矩阵基础库
-#include <Eigen/Geometry>   // 引入 Eigen 几何库
-#include <Eigen/Cholesky>   // 【新增】引入矩阵 Cholesky 分解库，用于对 H_prior 进行 LLT 分解
-#include <map>              // 引入标准字典容器
-#include <unordered_map>    // 引入无序哈希字典容器
-#include <vector>           // 引入标准动态数组容器
-#include <iostream>         // 引入标准输入输出流
+#include "backend/Optimizer.h"
+#include "core/KeyFrame.h"
+#include "core/MapPoint.h"
+#include "utils/Parameters.h"
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+#include <Eigen/Cholesky>
+#include <map>
+#include <unordered_map>
+#include <vector>
+#include <iostream>
+#include <cmath>
 
 // =========================================================================
-// 【新增辅助数学工具】计算三维向量的反对称矩阵 (Skew-Symmetric Matrix)
-// 作用：用于解析求解相机旋转扰动的雅可比矩阵
+// 静态工具函数（仅当前文件可见，已移除 namespace）
 // =========================================================================
-inline Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
+
+// 三维向量反对称矩阵
+static inline Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
 {
     Eigen::Matrix3d m;
     m << 0.0, -v.z(), v.y(),
@@ -25,398 +25,512 @@ inline Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
     return m;
 }
 
-// =========================================================================
-// 1. 基于主导帧逆深度的重投影误差代价函数 (1D Inverse Depth Residual)
-// 优点：省去 1/lambda 的除法运算，采用 VINS-Mono 经典的齐次形式乘法，数值极其稳定，无惧零深度突变
-// =========================================================================
-struct SREPROJECTION_INVERSE_DEPTH_ERROR
+/**
+ * @brief 位姿右扰动更新（李代数右乘模型，保证四元数流形约束）
+ */
+static inline void UpdatePose(const Eigen::Vector3d& t_old, const Eigen::Quaterniond& q_old,
+                       const Eigen::Matrix<double, 6, 1>& delta,
+                       Eigen::Vector3d& t_new, Eigen::Quaterniond& q_new)
 {
-    // 构造函数：传入特征点在主导帧(Host)上的归一化平面坐标，以及目标帧(Target)上的实际测量像素坐标与相机内参
-    SREPROJECTION_INVERSE_DEPTH_ERROR(double host_u_norm, double host_v_norm, 
-                                      double target_u, double target_v,
-                                      double fx, double fy, double cx, double cy)
-        : host_un(host_u_norm), host_vn(host_v_norm), 
-          target_u(target_u), target_v(target_v),
-          fx(fx), fy(fy), cx(cx), cy(cy) {}
+    // 平移增量从相机系转换到世界系
+    t_new = t_old + q_old.toRotationMatrix() * delta.head<3>();
 
-    template <typename T>
-    bool operator()(const T *const host_pose, const T *const target_pose, const T *const inv_depth, T *residuals) const
+    // 旋转增量：小角度四元数近似 + 右乘更新
+    Eigen::Vector3d delta_theta = delta.tail<3>();
+    Eigen::Quaterniond delta_q(
+        1.0,
+        delta_theta.x() / 2.0,
+        delta_theta.y() / 2.0,
+        delta_theta.z() / 2.0
+    );
+    delta_q.normalize();
+    q_new = q_old * delta_q;
+    q_new.normalize();
+}
+
+/**
+ * @brief 计算两个位姿之间的右扰动李代数误差
+ */
+static inline Eigen::Matrix<double, 6, 1> ComputePoseError(
+    const Eigen::Vector3d& t_prior, const Eigen::Quaterniond& q_prior,
+    const Eigen::Vector3d& t_curr, const Eigen::Quaterniond& q_curr)
+{
+    Eigen::Matrix<double, 6, 1> error;
+    // 相对平移：转换到先验位姿的局部坐标系
+    error.head<3>() = q_prior.inverse().toRotationMatrix() * (t_curr - t_prior);
+    // 相对旋转：四元数差转旋转向量
+    Eigen::Quaterniond q_rel = q_prior.inverse() * q_curr;
+    Eigen::AngleAxisd aa_rel(q_rel);
+    error.tail<3>() = aa_rel.angle() * aa_rel.axis();
+    return error;
+}
+
+/**
+ * @brief 计算逆深度重投影残差 + 解析雅可比
+ */
+static inline bool ComputeReprojectionResidualAndJacobians(
+    const Eigen::Vector3d& t_host, const Eigen::Quaterniond& q_host,
+    const Eigen::Vector3d& t_target, const Eigen::Quaterniond& q_target,
+    double inv_depth,
+    double host_un, double host_vn,
+    double target_u, double target_v,
+    double fx, double fy, double cx, double cy,
+    Eigen::Vector2d& residual,
+    Eigen::Matrix<double, 2, 6>& J_host,   // 残差对主导帧位姿的雅可比
+    Eigen::Matrix<double, 2, 6>& J_target, // 残差对目标帧位姿的雅可比
+    Eigen::Matrix<double, 2, 1>& J_lambda  // 残差对逆深度的雅可比
+)
+{
+    Eigen::Vector3d p_h0(host_un, host_vn, 1.0); // 主导帧归一化射线
+    double lambda = inv_depth;
+
+    // 1. 计算世界系3D点
+    Eigen::Vector3d P_h = p_h0 / lambda;
+    Eigen::Vector3d P_w = q_host * P_h + t_host;
+
+    // 2. 变换到目标相机系
+    Eigen::Vector3d P_t = q_target.inverse() * (P_w - t_target);
+    double X = P_t.x(), Y = P_t.y(), Z = P_t.z();
+
+    // 深度异常保护
+    if (Z < 1e-4)
     {
-        // 1. 解包主导帧位姿块 Host Pose
-        T t_h[3] = {host_pose[0], host_pose[1], host_pose[2]};
-        T q_h[4] = {host_pose[3], host_pose[4], host_pose[5], host_pose[6]};
-
-        // 2. 解包当前观测目标帧位姿块 Target Pose
-        T t_t[3] = {target_pose[0], target_pose[1], target_pose[2]};
-        T q_t[4] = {target_pose[3], target_pose[4], target_pose[5], target_pose[6]};
-
-        // 3. 提取 1 维逆深度状态量
-        T lambda = inv_depth[0];
-
-        // 4. 定义该点在主导帧下深度为 1 的虚拟 3D 射线坐标
-        T p_host_scaled[3] = {T(host_un), T(host_vn), T(1.0)};
-
-        // 5. 核心代数重构：将主导帧下的射线投影旋转到世界坐标系
-        T p_w_rot[3];
-        ceres::QuaternionRotatePoint(q_h, p_host_scaled, p_w_rot);
-
-        // 6. 齐次线性变换技巧：将世界系位移叠加并引入逆深度缩放，完全规避传统除以 lambda 的不稳定性
-        T p_w_trans[3] = {
-            p_w_rot[0] + lambda * (t_h[0] - t_t[0]),
-            p_w_rot[1] + lambda * (t_h[1] - t_t[1]),
-            p_w_trans[2] = p_w_rot[2] + lambda * (t_h[2] - t_t[2])
-        };
-
-        // 7. 将合并后的齐次世界点重投影变换到目标相机坐标系下：P_target = R_cw_target * p_w_trans
-        T q_t_inv[4] = {q_t[0], -q_t[1], -q_t[2], -q_t[3]}; // 对目标帧旋转求逆
-        T p_target[3];
-        ceres::QuaternionRotatePoint(q_t_inv, p_w_trans, p_target);
-
-        // 极值保护：深度截断异常规避
-        if (p_target[2] <= T(1e-4))
-        {
-            residuals[0] = T(1111.0);
-            residuals[1] = T(1111.0);
-            return true;
-        }
-
-        // 8. 投影到目标帧图像平面
-        T xp = p_target[0] / p_target[2];
-        T yp = p_target[1] / p_target[2];
-        T predicted_u = T(fx) * xp + T(cx);
-        T predicted_v = T(fy) * yp + T(cy);
-
-        // 9. 计算像素残差
-        residuals[0] = T(target_u) - predicted_u;
-        residuals[1] = T(target_v) - predicted_v;
-
-        return true;
+        residual.setConstant(1111.0);
+        J_host.setZero();
+        J_target.setZero();
+        J_lambda.setZero();
+        return false;
     }
 
-    // 静态工厂构建函数：2 维像素残差，7 维主导帧位姿，7 维目标观测帧位姿，1 维逆深度参数块
-    static ceres::CostFunction *Create(double host_u_norm, double host_v_norm, 
-                                       double target_u, double target_v,
-                                       double fx, double fy, double cx, double cy)
-    {
-        return (new ceres::AutoDiffCostFunction<SREPROJECTION_INVERSE_DEPTH_ERROR, 2, 7, 7, 1>(
-            new SREPROJECTION_INVERSE_DEPTH_ERROR(host_u_norm, host_v_norm, target_u, target_v, fx, fy, cx, cy)));
-    }
+    // 3. 投影雅可比：像素坐标对相机系3D点的导数
+    double inv_z = 1.0 / Z;
+    double inv_z2 = inv_z * inv_z;
+    Eigen::Matrix<double, 2, 3> J_proj;
+    J_proj << fx * inv_z, 0.0, -fx * X * inv_z2,
+              0.0, fy * inv_z, -fy * Y * inv_z2;
 
-    double host_un, host_vn;
-    double target_u, target_v;
-    double fx, fy, cx, cy;
+    // 4. 对目标帧位姿的雅可比（右扰动模型）
+    Eigen::Matrix<double, 3, 6> dP_t_dxi_target;
+    dP_t_dxi_target.block<3,3>(0,0) = -Eigen::Matrix3d::Identity();
+    dP_t_dxi_target.block<3,3>(0,3) = SkewSymmetric(P_t);
+    J_target = - J_proj * dP_t_dxi_target;
+
+    // 5. 对主导帧位姿的雅可比（右扰动模型）
+    Eigen::Matrix<double, 3, 6> dP_w_dxi_host;
+    dP_w_dxi_host.block<3,3>(0,0) = q_host.toRotationMatrix();
+    dP_w_dxi_host.block<3,3>(0,3) = q_host.toRotationMatrix() * SkewSymmetric(P_h);
+    Eigen::Matrix<double, 3, 6> dP_t_dxi_host = q_target.inverse().toRotationMatrix() * dP_w_dxi_host;
+    J_host = - J_proj * dP_t_dxi_host;
+
+    // 6. 对逆深度的雅可比
+    Eigen::Vector3d dP_h_dlambda = - p_h0 / (lambda * lambda);
+    Eigen::Vector3d dP_t_dlambda = q_target.inverse().toRotationMatrix() * q_host.toRotationMatrix() * dP_h_dlambda;
+    J_lambda = - J_proj * dP_t_dlambda;
+
+    // 7. 计算像素残差
+    double predicted_u = fx * X / Z + cx;
+    double predicted_v = fy * Y / Z + cy;
+    residual(0) = target_u - predicted_u;
+    residual(1) = target_v - predicted_v;
+
+    return true;
+}
+
+// 观测边结构体（全局静态，已移除 namespace）
+struct ObservationEdge
+{
+    int host_idx;       // 主导帧索引
+    int target_idx;     // 目标观测帧索引
+    int mp_idx;         // 地图点索引
+    double host_un;     // 主导帧归一化u坐标
+    double host_vn;     // 主导帧归一化v坐标
+    double target_u;    // 目标帧像素u
+    double target_v;    // 目标帧像素v
+    double huber_delta; // Huber核阈值
 };
 
 // =========================================================================
-// 2. 位姿边缘化状态先验代价函数 (Pose Prior Factor)
-// =========================================================================
-struct PosePriorFactor
-{
-    PosePriorFactor(const Eigen::Vector3d &prior_t, const Eigen::Quaterniond &prior_q, const Eigen::Matrix<double, 6, 6> &sqrt_info)
-        : m_prior_t(prior_t), m_prior_q(prior_q), m_sqrt_info(sqrt_info) {}
-
-    template <typename T>
-    bool operator()(const T *const camera_pose, T *residuals) const
-    {
-        T t[3] = {camera_pose[0], camera_pose[1], camera_pose[2]};
-        T q[4] = {camera_pose[3], camera_pose[4], camera_pose[5], camera_pose[6]};
-
-        T qw1 = T(m_prior_q.w()), qx1 = T(-m_prior_q.x()), qy1 = T(-m_prior_q.y()), qz1 = T(-m_prior_q.z());
-        T qw2 = q[0], qx2 = q[1], qy2 = q[2], qz2 = q[3];
-
-        T dq_w = qw1 * qw2 - qx1 * qx2 - qy1 * qy2 - qz1 * qz2;
-        T dq_x = qw1 * qx2 + qx1 * qw2 + qy1 * qz2 - qz1 * qy2;
-        T dq_y = qw1 * qy2 - qx1 * qz2 + qy1 * qw2 + qz1 * qx2;
-        T dq_z = qw1 * qz2 + qx1 * qy2 - qy1 * qx2 + qz1 * qw2;
-
-        T sign = (dq_w >= T(0.0)) ? T(1.0) : T(-1.0);
-
-        Eigen::Matrix<T, 6, 1> raw_residuals;
-        raw_residuals[0] = t[0] - T(m_prior_t.x());
-        raw_residuals[1] = t[1] - T(m_prior_t.y());
-        raw_residuals[2] = t[2] - T(m_prior_t.z());
-        raw_residuals[3] = T(2.0) * sign * dq_x;
-        raw_residuals[4] = T(2.0) * sign * dq_y;
-        raw_residuals[5] = T(2.0) * sign * dq_z;
-
-        Eigen::Matrix<T, 6, 1> weighted_residuals = m_sqrt_info.cast<T>() * raw_residuals;
-        for (int i = 0; i < 6; ++i) residuals[i] = weighted_residuals[i];
-        return true;
-    }
-
-    static ceres::CostFunction *Create(const Eigen::Vector3d &prior_t, const Eigen::Quaterniond &prior_q, const Eigen::Matrix<double, 6, 6> &sqrt_info)
-    {
-        return (new ceres::AutoDiffCostFunction<PosePriorFactor, 6, 7>(new PosePriorFactor(prior_t, prior_q, sqrt_info)));
-    }
-
-    Eigen::Vector3d m_prior_t;
-    Eigen::Quaterniond m_prior_q;
-    Eigen::Matrix<double, 6, 6> m_sqrt_info;
-};
-
-// =========================================================================
-// 3. 全新重构的局部滑窗逆深度 BA + 舒尔补边缘化传导算法主函数
+// 主函数：纯 Eigen 局部滑窗逆深度 BA + 舒尔补边缘化
 // =========================================================================
 void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
 {
     if (!pMap) return;
-
     std::vector<std::shared_ptr<KeyFrame>> allKFs = pMap->GetAllKeyFrames();
     if (allKFs.size() < 2) return;
 
-    // 1. 筛选并截取滑动窗口内的最新激活帧
+    // ====================== 1. 筛选滑动窗口激活帧 ======================
     std::vector<std::shared_ptr<KeyFrame>> activeKFs;
     int startIdx = std::max(0, static_cast<int>(allKFs.size()) - windowSize);
-    for (size_t i = startIdx; i < allKFs.size(); ++i) activeKFs.push_back(allKFs[i]);
+    for (size_t i = startIdx; i < allKFs.size(); ++i)
+        activeKFs.push_back(allKFs[i]);
+    
+    int num_kfs = activeKFs.size();
+    int pose_dim = num_kfs * 6; // 位姿总维度（每个6自由度李代数）
 
-    ceres::Problem problem;
+    // 位姿状态存储 + ID到索引映射
+    std::vector<Eigen::Vector3d> pose_t(num_kfs);
+    std::vector<Eigen::Quaterniond> pose_q(num_kfs);
+    std::unordered_map<unsigned long, int> kf_id_to_idx;
+    for (int i = 0; i < num_kfs; ++i)
+    {
+        Eigen::Isometry3d Twc = activeKFs[i]->GetPose();
+        pose_t[i] = Twc.translation();
+        pose_q[i] = Eigen::Quaterniond(Twc.rotation());
+        kf_id_to_idx[activeKFs[i]->mId] = i;
+    }
 
-    std::map<unsigned long, std::vector<double>> mapKFIdToParameterBlock;
-    std::map<int, double> mapMPIdToInvDepth;                 // 存储地图点 1 自由度的逆深度参数块
-    std::map<int, std::shared_ptr<KeyFrame>> mapMPIdToHostKF;// 存储每个地图点在当前滑窗内的“主导关键帧”
-    std::map<int, std::shared_ptr<MapPoint>> mapIdToMPRef;
-
+    // 相机内参
     double cam_fx = Parameters::fx;
     double cam_fy = Parameters::fy;
     double cam_cx = Parameters::cx;
     double cam_cy = Parameters::cy;
 
-    // 2. 装载激活帧位姿到 Ceres 参数块中
-    for (size_t i = 0; i < activeKFs.size(); ++i)
-    {
-        auto kf = activeKFs[i];
-        Eigen::Isometry3d Twc = kf->GetPose();
-        Eigen::Vector3d t = Twc.translation();
-        Eigen::Quaterniond q(Twc.rotation());
-
-        std::vector<double> pose_block = {t.x(), t.y(), t.z(), q.w(), q.x(), q.y(), q.z()};
-        mapKFIdToParameterBlock[kf->mId] = pose_block;
-    }
-
-    // 提前构建全局点云的 O(1) 哈希快速查找表，消除多层循环内部的线性搜索
+    // ====================== 2. 地图点预处理 + 主导帧选拔 ======================
     std::vector<std::shared_ptr<MapPoint>> allMPs = pMap->GetAllMapPoints();
     std::unordered_map<int, std::shared_ptr<MapPoint>> mapIdToMP;
-    for (const auto &mp : allMPs) mapIdToMP[mp->GetFeatureId()] = mp;
+    for (const auto &mp : allMPs)
+        mapIdToMP[mp->GetFeatureId()] = mp;
 
-    // 3. 为主窗口内的每一个地图点选拔选定它的“主导帧（Host）”并计算初始逆深度
-    for (auto kf : activeKFs)
+    std::unordered_map<int, int> mp_id_to_idx;   // 地图点ID→索引
+    std::vector<double> inv_depth_vec;           // 逆深度参数数组
+    std::vector<int> mp_host_kf_idx;             // 每个地图点的主导帧索引
+    std::vector<std::shared_ptr<MapPoint>> mp_ref_vec; // 地图点指针数组
+
+    for (int i = 0; i < num_kfs; ++i)
     {
+        auto kf = activeKFs[i];
         for (const auto &obs : kf->mmObservations)
         {
             int mp_id = obs.first;
             auto it_mp = mapIdToMP.find(mp_id);
             if (it_mp == mapIdToMP.end()) continue;
 
-            // 如果该地图点还没有指定主导帧，则在滑窗内最早看见它的那一帧被确立为主导帧
-            if (mapMPIdToHostKF.find(mp_id) == mapMPIdToHostKF.end())
+            // 首次出现的地图点：设置主导帧 + 初始化逆深度
+            if (mp_id_to_idx.find(mp_id) == mp_id_to_idx.end())
             {
-                std::shared_ptr<MapPoint> targetMP = it_mp->second;
-                mapMPIdToHostKF[mp_id] = kf;
-                mapIdToMPRef[mp_id] = targetMP;
+                int mp_idx = inv_depth_vec.size();
+                mp_id_to_idx[mp_id] = mp_idx;
+                mp_host_kf_idx.push_back(i);
+                mp_ref_vec.push_back(it_mp->second);
 
-                // 计算地图点关于主导帧的初始逆深度
-                Eigen::Vector3d P_w = targetMP->GetWorldPos();
-                Eigen::Isometry3d Twc_host = kf->GetPose();
-                Eigen::Vector3d P_host = Twc_host.inverse() * P_w; // 变换到主导相机坐标系下
-
-                double depth = P_host.z();
-                if (depth < 0.1) depth = 1.0; 
-                mapMPIdToInvDepth[mp_id] = 1.0 / depth; // 写入 1 维逆深度初值
+                // 计算初始逆深度
+                Eigen::Vector3d P_w = it_mp->second->GetWorldPos();
+                Eigen::Vector3d P_host = kf->GetPose().inverse() * P_w;
+                double depth = P_host.z() < 0.1 ? 1.0 : P_host.z();
+                inv_depth_vec.push_back(1.0 / depth);
             }
         }
     }
+    int num_mps = inv_depth_vec.size();
 
-    // 4. 建立 1D 逆深度重投影误差约束
-    for (auto kf : activeKFs)
+    // ====================== 3. 预构建所有观测约束边 ======================
+    std::vector<ObservationEdge> edges;
+    for (int target_idx = 0; target_idx < num_kfs; ++target_idx)
     {
-        unsigned long target_kf_id = kf->mId;
+        auto kf = activeKFs[target_idx];
         for (const auto &obs : kf->mmObservations)
         {
             int mp_id = obs.first;
-            cv::Point2f pt_target = obs.second; // 当前目标观测帧上的 2D 像素坐标
+            cv::Point2f pt_target = obs.second;
+            auto it_mp_idx = mp_id_to_idx.find(mp_id);
+            if (it_mp_idx == mp_id_to_idx.end()) continue;
+            
+            int mp_idx = it_mp_idx->second;
+            int host_idx = mp_host_kf_idx[mp_idx];
+            if (host_idx == target_idx) continue; // 主导帧自身无残差
 
-            if (mapMPIdToHostKF.find(mp_id) == mapMPIdToHostKF.end()) continue;
-            auto hostKF = mapMPIdToHostKF[mp_id];
+            // 主导帧归一化坐标
+            cv::Point2f pt_host = activeKFs[host_idx]->mmObservations[mp_id];
+            double host_un = (pt_host.x - cam_cx) / cam_fx;
+            double host_vn = (pt_host.y - cam_cy) / cam_fy;
 
-            // 【性能裁剪机制】如果当前观测帧本身就是该点的主导帧，则残差永远为 0，直接略过
-            if (target_kf_id == hostKF->mId) continue;
-
-            // 提取主导帧上的对应 2D 特征观测，并换算为去畸变后的归一化相机坐标
-            cv::Point2f pt_host = hostKF->mmObservations[mp_id];
-            double host_u_norm = (pt_host.x - cam_cx) / cam_fx;
-            double host_v_norm = (pt_host.y - cam_cy) / cam_fy;
-
-            // 实例化逆深度代价函数
-            ceres::CostFunction *cost_function = SREPROJECTION_INVERSE_DEPTH_ERROR::Create(
-                host_u_norm, host_v_norm, pt_target.x, pt_target.y, cam_fx, cam_fy, cam_cx, cam_cy);
-
-            // 自适应 HuberLoss 核函数机制
-            std::shared_ptr<MapPoint> targetMP = mapIdToMPRef[mp_id];
-            int obs_count = targetMP->GetObservationCount();
+            // 自适应Huber阈值
+            int obs_count = mp_ref_vec[mp_idx]->GetObservationCount();
             double huber_delta = (obs_count >= 5) ? 1.0 : ((obs_count >= 2) ? 1.5 : 3.0);
-            ceres::LossFunction *adaptive_loss_function = new ceres::HuberLoss(huber_delta);
 
-            // 向 Ceres 因子图中注入约束边
-            problem.AddResidualBlock(cost_function, adaptive_loss_function,
-                                     mapKFIdToParameterBlock[hostKF->mId].data(),
-                                     mapKFIdToParameterBlock[target_kf_id].data(),
-                                     &mapMPIdToInvDepth[mp_id]);
+            edges.push_back({host_idx, target_idx, mp_idx, 
+                            host_un, host_vn, 
+                            pt_target.x, pt_target.y, 
+                            huber_delta});
         }
     }
 
-    // 5. 对 1D 逆深度施加物理界限有界约束，防止解算严重震荡出现负深度
-    for (auto &pair : mapMPIdToInvDepth)
+    // ====================== 4. 计算第一帧边缘化先验信息矩阵 ======================
+    Eigen::Matrix<double, 6, 6> H_prior = Eigen::Matrix<double, 6, 6>::Identity() * 1.0;
+    Eigen::Vector3d prior_t = pose_t[0];
+    Eigen::Quaterniond prior_q = pose_q[0];
     {
-        problem.AddParameterBlock(&pair.second, 1);
-        problem.SetParameterLowerBound(&pair.second, 0, 0.001); // 限制最远深度为 1000 米
-        problem.SetParameterUpperBound(&pair.second, 0, 10.0);  // 限制最近深度为 0.1 米
-    }
+        Eigen::Matrix<double, 6, 6> H_mm = Eigen::Matrix<double, 6, 6>::Zero();
+        Eigen::Matrix<double, 6, 3> H_mr = Eigen::Matrix<double, 6, 3>::Zero();
+        Eigen::Matrix<double, 3, 3> H_rr_sum = Eigen::Matrix<double, 3, 3>::Zero();
+        double pixel_noise_sigma = 1.5;
+        double omega_pixel = 1.0 / (pixel_noise_sigma * pixel_noise_sigma);
+        int effective_obs_count = 0;
 
-    // 6. 流形设置与滑窗首帧【基于舒尔补的边缘化动态传导】
-    for (size_t i = 0; i < activeKFs.size(); ++i)
-    {
-        auto kf = activeKFs[i];
-        double *pose_data = mapKFIdToParameterBlock[kf->mId].data();
+        Eigen::Isometry3d Twc_prior = activeKFs[0]->GetPose();
+        Eigen::Matrix3d R_prior = Twc_prior.rotation();
 
-#if CERES_VERSION_MAJOR >= 2 && CERES_VERSION_MINOR >= 1
-        problem.SetManifold(pose_data, new ceres::ProductManifold<ceres::EuclideanManifold<3>, ceres::QuaternionManifold>(
-                                           ceres::EuclideanManifold<3>(), ceres::QuaternionManifold()));
-#else
-        ceres::LocalParameterization *quaternion_parameterization = new ceres::QuaternionParameterization();
-        problem.SetParameterization(pose_data, new ceres::ProductParameterization(new ceres::IdentityParameterization(3), quaternion_parameterization));
-#endif
-
-        // =========================================================================
-        // 【核心机制重构】基于舒尔补的“边缘化”（Marginalization）动态传导逻辑
-        // 作用：彻底取消固定值 50.0 和 100.0，改为由当前老帧特征点几何结构动态解算信息矩阵！
-        // =========================================================================
-        if (i == 0)
+        for (const auto &obs : activeKFs[0]->mmObservations)
         {
-            Eigen::Isometry3d Twc_prior = kf->GetPose();
-            Eigen::Vector3d prior_t = Twc_prior.translation();
-            Eigen::Quaterniond prior_q(Twc_prior.rotation());
+            int mp_id = obs.first;
+            auto it_mp = mapIdToMP.find(mp_id);
+            if (it_mp == mapIdToMP.end()) continue;
 
-            // 初始化全动态海森矩阵 H 和梯度向量 g
-            // 状态排布：最老帧位姿 x_m (6自由度: [平移, 旋转扰动]), 活跃地图点 x_r (3自由度)
-            Eigen::Matrix<double, 6, 6> H_mm = Eigen::Matrix<double, 6, 6>::Zero();
-            Eigen::Matrix<double, 6, 3> H_mr = Eigen::Matrix<double, 6, 3>::Zero();
-            Eigen::Matrix<double, 3, 3> H_rr_sum = Eigen::Matrix<double, 3, 3>::Zero();
+            Eigen::Vector3d P_w = it_mp->second->GetWorldPos();
+            Eigen::Vector3d P_c = Twc_prior.inverse() * P_w;
+            double X = P_c.x(), Y = P_c.y(), Z = P_c.z();
+            if (Z < 0.2) continue;
+            effective_obs_count++;
 
-            double pixel_noise_sigma = 1.5; // 设图像追踪像素噪声标准差为 1.5 像素
-            double omega_pixel = 1.0 / (pixel_noise_sigma * pixel_noise_sigma);
-            int effective_obs_count = 0;
+            // 投影雅可比
+            Eigen::Matrix<double, 2, 3> J_proj;
+            double inv_z = 1.0 / Z;
+            double inv_z2 = inv_z * inv_z;
+            J_proj << cam_fx * inv_z, 0.0, -cam_fx * X * inv_z2,
+                      0.0, cam_fy * inv_z, -cam_fy * Y * inv_z2;
 
-            // 遍历该最老帧身上的所有 2D 观测，解析求解空间几何雅可比
-            for (const auto &obs : kf->mmObservations)
-            {
-                int mp_id = obs.first;
-                auto it_mp = mapIdToMP.find(mp_id);
-                if (it_mp == mapIdToMP.end()) continue;
-                std::shared_ptr<MapPoint> mp = it_mp->second;
+            // 位姿雅可比
+            Eigen::Matrix<double, 3, 6> J_space;
+            J_space.block<3, 3>(0, 0) = -R_prior.transpose();
+            J_space.block<3, 3>(0, 3) = SkewSymmetric(P_c);
+            Eigen::Matrix<double, 2, 6> J_pose = J_proj * J_space;
 
-                Eigen::Vector3d P_w = mp->GetWorldPos();
-                Eigen::Vector3d P_c = Twc_prior.inverse() * P_w; // 变换到相机坐标系
-                double X = P_c.x(), Y = P_c.y(), Z = P_c.z();
-                if (Z < 0.2) continue;
-                
-                effective_obs_count++;
+            // 地图点雅可比
+            Eigen::Matrix<double, 2, 3> J_point = J_proj * R_prior.transpose();
 
-                // A. 求解 2x3 的图像平面投影对相机系 3D 点的雅可比 J_proj
-                Eigen::Matrix<double, 2, 3> J_proj;
-                double inv_z = 1.0 / Z;
-                double inv_z2 = inv_z * inv_z;
-                J_proj << cam_fx * inv_z, 0.0, -cam_fx * X * inv_z2,
-                          0.0, cam_fy * inv_z, -cam_fy * Y * inv_z2;
+            H_mm += J_pose.transpose() * omega_pixel * J_pose;
+            H_mr += J_pose.transpose() * omega_pixel * J_point;
+            H_rr_sum += J_point.transpose() * omega_pixel * J_point;
+        }
 
-                // B. 求解 3x6 的相机系 3D 点对局部李代数扰动 [平移, 旋转] 的雅可比 J_space
-                // 注意：Ceres 流形内平移是世界系相加，四元数是右乘扰动
-                Eigen::Matrix<double, 3, 6> J_space;
-                J_space.block<3, 3>(0, 0) = -Twc_prior.linear().transpose(); // dP_c / dt_world
-                J_space.block<3, 3>(0, 3) = SkewSymmetric(P_c);               // dP_c / d\theta
-
-                Eigen::Matrix<double, 2, 6> J_pose = J_proj * J_space;
-
-                // C. 求解 2x3 的图像平面对世界地图点 3D 坐标的雅可比 J_point
-                Eigen::Matrix<double, 2, 3> J_point = J_proj * Twc_prior.linear().transpose();
-
-                // D. 动态累加高斯牛顿矩阵分块
-                H_mm += J_pose.transpose() * omega_pixel * J_pose;
-                H_mr += J_pose.transpose() * omega_pixel * J_point;
-                H_rr_sum += J_point.transpose() * omega_pixel * J_point;
-            }
-
-            // 执行矩阵层面的舒尔补消元传导 (Schur Complement)
-            Eigen::Matrix<double, 6, 6> H_prior = Eigen::Matrix<double, 6, 6>::Identity() * 1.0; // 基础弱约束保底
-            if (effective_obs_count > 4)
-            {
-                Eigen::Matrix3d H_rr_inv = H_rr_sum.inverse();
-                H_prior += H_mm - H_mr * H_rr_inv * H_mr.transpose();
-            }
-            else
-            {
-                // 极端无共视点环境下的退化安全保护
-                H_prior.block<3, 3>(0, 0) *= 50.0;
-                H_prior.block<3, 3>(3, 3) *= 100.0;
-            }
-
-            // 对实时派生出的 H_prior 进行 LLT 分解，安全提取 Ceres 所需的平方根信息权重矩阵
-            Eigen::LLT<Eigen::Matrix<double, 6, 6>> lltOfH(H_prior);
-            Eigen::Matrix<double, 6, 6> sqrt_info = lltOfH.matrixL().transpose();
-
-            // 构造软约束因子边注入因子图
-            ceres::CostFunction *prior_cost_function = PosePriorFactor::Create(prior_t, prior_q, sqrt_info);
-            problem.AddResidualBlock(prior_cost_function, nullptr, pose_data);
+        if (effective_obs_count > 4)
+        {
+            Eigen::Matrix3d H_rr_inv = H_rr_sum.inverse();
+            H_prior += H_mm - H_mr * H_rr_inv * H_mr.transpose();
+        }
+        else
+        {
+            // 退化场景保底约束
+            H_prior.block<3, 3>(0, 0) *= 50.0;
+            H_prior.block<3, 3>(3, 3) *= 100.0;
         }
     }
 
-    // 7. 配置高度精简、低迭代、高响应的求解器参数
-    ceres::Solver::Options options;
-    options.linear_solver_type = ceres::SPARSE_SCHUR; 
-    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.max_num_iterations = 6;                  // 逆深度参数空间特征极佳，6 次迭代即可完全收敛
-    options.minimizer_progress_to_stdout = false;
+    // ====================== 5. Levenberg-Marquardt 迭代求解 ======================
+    double lambda_lm = 1e-3;       // LM阻尼因子
+    const double lambda_boost = 10.0;
+    const double lambda_shrink = 0.1;
+    const int max_iter = 6;        // 与原代码保持一致
+    const double eps_converge = 1e-6;
 
-    ceres::Solver::Summary summary;
-    ceres::Solve(options, &problem, &summary);
+    // 状态备份（用于更新失败回滚）
+    std::vector<Eigen::Vector3d> last_pose_t = pose_t;
+    std::vector<Eigen::Quaterniond> last_pose_q = pose_q;
+    std::vector<double> last_inv_depth = inv_depth_vec;
+    double last_cost = 0.0;
+    bool first_iter = true;
 
-    // 8. 优化成功，将精调后的位姿和【重新反投影恢复出的 3D 世界坐标】刷回数据库
-    if (summary.termination_type == ceres::CONVERGENCE || summary.termination_type == ceres::USER_SUCCESS)
+    const double min_inv_depth = 0.001; // 最远深度1000米
+    const double max_inv_depth = 10.0;  // 最近深度0.1米
+
+    for (int iter = 0; iter < max_iter; ++iter)
     {
-        // A. 关键帧位姿恢复写回
-        for (auto kf : activeKFs)
+        // ---------- 5.1 构建全局Hessian矩阵与梯度向量 ----------
+        Eigen::MatrixXd H_xx = Eigen::MatrixXd::Zero(pose_dim, pose_dim);
+        Eigen::VectorXd g_x = Eigen::VectorXd::Zero(pose_dim);
+
+        std::vector<double> H_ll(num_mps, 0.0);        // 逆深度Hessian对角元
+        std::vector<Eigen::VectorXd> H_xl(num_mps, Eigen::VectorXd::Zero(pose_dim)); // 位姿-逆深度交叉项
+        std::vector<double> g_l(num_mps, 0.0);        // 逆深度梯度
+
+        double total_cost = 0.0;
+
+        // 遍历所有观测边累加
+        for (const auto& edge : edges)
         {
-            auto &data = mapKFIdToParameterBlock[kf->mId];
-            Eigen::Vector3d t_opt(data[0], data[1], data[2]);
-            Eigen::Quaterniond q_opt(data[3], data[4], data[5], data[6]);
+            int host_start = edge.host_idx * 6;
+            int target_start = edge.target_idx * 6;
+            int mp_idx = edge.mp_idx;
 
-            Eigen::Isometry3d Twc_opt = Eigen::Isometry3d::Identity();
-            Twc_opt.linear() = q_opt.toRotationMatrix();
-            Twc_opt.translation() = t_opt;
+            Eigen::Vector2d residual;
+            Eigen::Matrix<double, 2, 6> J_host, J_target;
+            Eigen::Matrix<double, 2, 1> J_lambda;
 
-            kf->SetPose(Twc_opt);
+            bool valid = ComputeReprojectionResidualAndJacobians(
+                pose_t[edge.host_idx], pose_q[edge.host_idx],
+                pose_t[edge.target_idx], pose_q[edge.target_idx],
+                inv_depth_vec[mp_idx],
+                edge.host_un, edge.host_vn,
+                edge.target_u, edge.target_v,
+                cam_fx, cam_fy, cam_cx, cam_cy,
+                residual, J_host, J_target, J_lambda
+            );
+            if (!valid) continue;
+
+            // 自适应Huber核加权
+            double res_norm = residual.norm();
+            double huber_w = 1.0;
+            if (res_norm > edge.huber_delta)
+                huber_w = edge.huber_delta / res_norm;
+            
+            residual *= huber_w;
+            J_host *= huber_w;
+            J_target *= huber_w;
+            J_lambda *= huber_w;
+
+            total_cost += residual.squaredNorm();
+
+            // 累加位姿Hessian分块
+            H_xx.block<6,6>(host_start, host_start) += J_host.transpose() * J_host;
+            H_xx.block<6,6>(host_start, target_start) += J_host.transpose() * J_target;
+            H_xx.block<6,6>(target_start, host_start) += J_target.transpose() * J_host;
+            H_xx.block<6,6>(target_start, target_start) += J_target.transpose() * J_target;
+
+            // 累加位姿梯度
+            g_x.segment<6>(host_start) += J_host.transpose() * residual;
+            g_x.segment<6>(target_start) += J_target.transpose() * residual;
+
+            // 累加逆深度相关项
+            H_ll[mp_idx] += (J_lambda.transpose() * J_lambda)(0,0);
+            H_xl[mp_idx].segment<6>(host_start) += J_host.transpose() * J_lambda;
+            H_xl[mp_idx].segment<6>(target_start) += J_target.transpose() * J_lambda;
+            g_l[mp_idx] += (J_lambda.transpose() * residual)(0,0);
         }
 
-        // B. 地图路标点坐标反投影转换写回
-        // 数学公式：P_world = R_world_host * ( (1/lambda_opt) * [u_n, v_n, 1]^T ) + t_world_host
-        for (const auto &pair : mapMPIdToInvDepth)
+        // ---------- 5.2 加入第一帧边缘化先验约束 ----------
         {
-            int mp_id = pair.first;
-            double lambda_opt = pair.second; 
-            auto hostKF = mapMPIdToHostKF[mp_id];
-
-            auto &host_pose_data = mapKFIdToParameterBlock[hostKF->mId];
-            Eigen::Vector3d t_h_opt(host_pose_data[0], host_pose_data[1], host_pose_data[2]);
-            Eigen::Quaterniond q_h_opt(host_pose_data[3], host_pose_data[4], host_pose_data[5], host_pose_data[6]);
-
-            cv::Point2f pt_host = hostKF->mmObservations[mp_id];
-            double host_u_norm = (pt_host.x - cam_cx) / cam_fx;
-            double host_v_norm = (pt_host.y - cam_cy) / cam_fy;
-
-            // 逆深度反投影恢复
-            Eigen::Vector3d p_h_scaled(host_u_norm, host_v_norm, 1.0);
-            Eigen::Vector3d pos_world_opt = q_h_opt * (p_h_scaled / lambda_opt) + t_h_opt;
-
-            mapIdToMPRef[mp_id]->SetWorldPos(pos_world_opt);
+            int first_start = 0;
+            Eigen::Matrix<double,6,1> prior_error = ComputePoseError(prior_t, prior_q, pose_t[0], pose_q[0]);
+            H_xx.block<6,6>(first_start, first_start) += H_prior;
+            g_x.segment<6>(first_start) += H_prior * prior_error;
+            total_cost += prior_error.transpose() * H_prior * prior_error;
         }
+
+        // ---------- 5.3 舒尔补消去逆深度（仅需求解位姿增量） ----------
+        Eigen::MatrixXd H_schur = H_xx;
+        Eigen::VectorXd g_schur = g_x;
+        for (int j = 0; j < num_mps; ++j)
+        {
+            if (H_ll[j] < 1e-12) continue;
+            H_schur -= H_xl[j] * H_xl[j].transpose() / H_ll[j];
+            g_schur -= H_xl[j] * g_l[j] / H_ll[j];
+        }
+
+        // ---------- 5.4 LM阻尼正则化 ----------
+        Eigen::MatrixXd H_reg = H_schur;
+        for (int i = 0; i < pose_dim; ++i)
+            H_reg(i,i) += lambda_lm;
+
+        // ---------- 5.5 求解位姿增量 ----------
+        Eigen::LLT<Eigen::MatrixXd> llt(H_reg);
+        if (llt.info() != Eigen::Success)
+        {
+            lambda_lm *= lambda_boost;
+            continue;
+        }
+        Eigen::VectorXd delta_x = llt.solve(-g_schur);
+
+        // ---------- 5.6 回代求解逆深度增量 ----------
+        Eigen::VectorXd delta_l(num_mps);
+        for (int j = 0; j < num_mps; ++j)
+        {
+            if (H_ll[j] < 1e-12)
+            {
+                delta_l(j) = 0.0;
+                continue;
+            }
+            double rhs = -g_l[j] - H_xl[j].dot(delta_x);
+            delta_l(j) = rhs / H_ll[j];
+        }
+
+        // ---------- 5.7 状态更新 ----------
+        last_pose_t = pose_t;
+        last_pose_q = pose_q;
+        last_inv_depth = inv_depth_vec;
+        last_cost = total_cost;
+
+        // 更新位姿（流形约束）
+        for (int i = 0; i < num_kfs; ++i)
+        {
+            Eigen::Matrix<double,6,1> delta = delta_x.segment<6>(i*6);
+            UpdatePose(pose_t[i], pose_q[i], delta, pose_t[i], pose_q[i]);
+        }
+
+        // 更新逆深度 + 有界约束截断
+        for (int j = 0; j < num_mps; ++j)
+        {
+            inv_depth_vec[j] += delta_l(j);
+            inv_depth_vec[j] = std::max(min_inv_depth, std::min(max_inv_depth, inv_depth_vec[j]));
+        }
+
+        // ---------- 5.8 代价校验 + 阻尼调整 ----------
+        // 计算更新后的总代价
+        double new_cost = 0.0;
+        for (const auto& edge : edges)
+        {
+            Eigen::Vector2d r;
+            Eigen::Matrix<double,2,6> Jh, Jt;
+            Eigen::Matrix<double,2,1> Jl;
+            ComputeReprojectionResidualAndJacobians(
+                pose_t[edge.host_idx], pose_q[edge.host_idx],
+                pose_t[edge.target_idx], pose_q[edge.target_idx],
+                inv_depth_vec[edge.mp_idx],
+                edge.host_un, edge.host_vn,
+                edge.target_u, edge.target_v,
+                cam_fx, cam_fy, cam_cx, cam_cy,
+                r, Jh, Jt, Jl
+            );
+            double rn = r.norm();
+            double w = rn > edge.huber_delta ? edge.huber_delta / rn : 1.0;
+            new_cost += (r * w).squaredNorm();
+        }
+        // 加上先验代价
+        {
+            Eigen::Matrix<double,6,1> perr = ComputePoseError(prior_t, prior_q, pose_t[0], pose_q[0]);
+            new_cost += perr.transpose() * H_prior * perr;
+        }
+
+        // LM阻尼策略
+        if (new_cost < last_cost || first_iter)
+        {
+            lambda_lm *= lambda_shrink;
+            first_iter = false;
+            if (fabs(last_cost - new_cost) < eps_converge * last_cost)
+                break; // 收敛提前退出
+        }
+        else
+        {
+            // 更新无效，回滚状态并增大阻尼
+            pose_t = last_pose_t;
+            pose_q = last_pose_q;
+            inv_depth_vec = last_inv_depth;
+            lambda_lm *= lambda_boost;
+        }
+    }
+
+    // ====================== 6. 优化结果写回地图 ======================
+    // A. 写回关键帧位姿
+    for (int i = 0; i < num_kfs; ++i)
+    {
+        Eigen::Isometry3d Twc_opt = Eigen::Isometry3d::Identity();
+        Twc_opt.linear() = pose_q[i].toRotationMatrix();
+        Twc_opt.translation() = pose_t[i];
+        activeKFs[i]->SetPose(Twc_opt);
+    }
+
+    // B. 逆深度反投影写回地图点世界坐标
+    for (int j = 0; j < num_mps; ++j)
+    {
+        double lambda_opt = inv_depth_vec[j];
+        int host_idx = mp_host_kf_idx[j];
+        int mp_id = mp_ref_vec[j]->GetFeatureId();
+
+        cv::Point2f pt_host = activeKFs[host_idx]->mmObservations[mp_id];
+        double host_un = (pt_host.x - cam_cx) / cam_fx;
+        double host_vn = (pt_host.y - cam_cy) / cam_fy;
+
+        Eigen::Vector3d p_h_scaled(host_un, host_vn, 1.0);
+        Eigen::Vector3d pos_world_opt = pose_q[host_idx] * (p_h_scaled / lambda_opt) + pose_t[host_idx];
+        mp_ref_vec[j]->SetWorldPos(pos_world_opt);
     }
 }
