@@ -29,6 +29,7 @@
 #include "core/Map.h"
 #include "utils/Parameters.h"
 #include <fstream>
+
 class StereoVONode
 {
 public:
@@ -87,9 +88,6 @@ public:
         // 1. 关闭前端全帧率测距流
         if (fout_trajectory_.is_open())
             fout_trajectory_.close();
-
-        // 2. 触发调用：一次性打包保存最终优化完的关键帧高精度轨迹
-        SaveOptimizedKeyFrames();
     }
 
     std::shared_ptr<rclcpp::Node> get_node() const { return node_; }
@@ -191,7 +189,6 @@ private:
         pub_latest_odometry_->publish(odom);
     }
 
-    // 1. 改变函数签名，接收原始位姿和 ROS 位姿
     void PublishOdometry(const std_msgs::msg::Header &header,
                          const Eigen::Vector3d &P_ros, const Eigen::Quaterniond &Q_ros,
                          const Eigen::Vector3d &P_cam, const Eigen::Matrix3d &R_cam)
@@ -218,7 +215,7 @@ private:
 
         std::lock_guard<std::mutex> lock(path_mutex_);
         if (mv_path_poses_.size() > 2000)
-        { // 顺便防止上一轮提到的内存暴涨问题
+        {
             mv_path_poses_.erase(mv_path_poses_.begin());
         }
         mv_path_poses_.push_back(pose_stamped);
@@ -242,9 +239,7 @@ private:
         transformStamped.transform.rotation.w = Q_ros.w();
         tf_broadcaster_->sendTransform(transformStamped);
 
-        // 4. 【核心修复】保存轨迹文件时，严格使用相机坐标系的 P_cam 和 R_cam
-        std::string kitti_filename = Parameters::OUTPUT_PATH + "trajectory.txt";
-        std::ofstream foutK(kitti_filename, std::ios::app);
+        // 4. 保存轨迹文件时，严格使用相机坐标系的 P_cam 和 R_cam
         if (fout_trajectory_.is_open())
         {
             fout_trajectory_.setf(std::ios::fixed, std::ios::floatfield);
@@ -278,14 +273,12 @@ private:
         visualization_msgs::msg::Marker edge_marker;
         edge_marker.header = header;
 
-        // 【核心修复一】直接将坐标系绑定到实时移动的 "body" 上！
         edge_marker.header.frame_id = "body";
         edge_marker.ns = "camera_pose_visual";
         edge_marker.id = 0;
         edge_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
         edge_marker.action = visualization_msgs::msg::Marker::ADD;
 
-        // 既然绑定在了 body 坐标系上，Marker 本身的局部 Pose 直接归零单位化即可，省去手工复杂矩阵翻转
         edge_marker.pose.position.x = 0.0;
         edge_marker.pose.position.y = 0.0;
         edge_marker.pose.position.z = 0.0;
@@ -300,8 +293,6 @@ private:
         edge_marker.color.b = 0.0;
         edge_marker.color.a = 1.0;
 
-        // ROS标准坐标系下，X是正前方，Y是左侧，Z是上方
-        // 为此我们将原本视觉定义下的视锥顶点直接平移旋转映射到 ROS 的 X 轴方向上
         double scale = 0.2;
         auto create_ros_body_pt = [&](double fwd, double lft, double up)
         {
@@ -427,7 +418,7 @@ private:
         sensor_msgs::msg::PointCloud feature_msg;
         feature_msg.header = header;
 
-        // 【核心修复二】将 frame_id 从 "world" 修改为 "body"，让其变为局部的归一化平面特征点
+        // 将 frame_id 从 "world" 修改为 "body"，让其变为局部的归一化平面特征点
         feature_msg.header.frame_id = "body";
 
         sensor_msgs::msg::ChannelFloat32 id_ch, cam_ch, u_ch, v_ch, vx_ch, vy_ch;
@@ -468,33 +459,6 @@ private:
         pub_features_->publish(feature_msg);
     }
 
-    // 新增：在进程退出时，一次性把经历过完整 BA 优化的所有历史关键帧导出
-    void SaveOptimizedKeyFrames()
-    {
-        std::string kitti_filename = Parameters::OUTPUT_PATH + "optimized_kf_trajectory.txt";
-        std::ofstream foutK(kitti_filename, std::ios::trunc);
-        if (!foutK.is_open())
-            return;
-
-        foutK.setf(std::ios::fixed, std::ios::floatfield);
-        foutK.precision(6);
-
-        auto allKFs = mpMap->GetAllKeyFrames();
-        for (const auto &kf : allKFs)
-        {
-            // 这里调用了加锁后的 GetPose()，安全拿到后端精调后的位姿
-            Eigen::Isometry3d Twc = kf->GetPose();
-            Eigen::Matrix3d R_cam = Twc.rotation();
-            Eigen::Vector3d P_cam = Twc.translation();
-
-            foutK << R_cam(0, 0) << " " << R_cam(0, 1) << " " << R_cam(0, 2) << " " << P_cam.x() << " "
-                  << R_cam(1, 0) << " " << R_cam(1, 1) << " " << R_cam(1, 2) << " " << P_cam.y() << " "
-                  << R_cam(2, 0) << " " << R_cam(2, 1) << " " << R_cam(2, 2) << " " << P_cam.z() << "\n";
-        }
-        foutK.close();
-        RCLCPP_INFO(node_->get_logger(), ">>> [SLAM系统结束] 已成功导出完全优化后的纯关键帧高精度轨迹！总计: %zu 帧", allKFs.size());
-    }
-
     void OnTrackingRendered(double timestamp,
                             const cv::Mat &feat_img,
                             const std::vector<Eigen::Vector3d> &vWorldPoints,
@@ -528,7 +492,7 @@ private:
 
         PublishLatestOdometry(P_ros, Q_ros, timestamp);
 
-        // 【修改】同时把 ROS 位姿和原始相机位姿传进去
+        // 同时把 ROS 位姿 and 原始相机位姿传进去
         PublishOdometry(header, P_ros, Q_ros, P_cam, R_cam);
 
         PublishCameraPose(header, P_ros, Q_ros);

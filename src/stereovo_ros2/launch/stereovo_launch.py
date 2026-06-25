@@ -7,7 +7,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # 1. 定义包名
-    package_name = 'Stereovo_ros2'
+    package_name = 'stereovo_ros2'
 
     # 2. 声明参数文件的绝对路径（默认指向你指定的 KITTI yaml 文件）
     config_file_arg = DeclareLaunchArgument(
@@ -27,7 +27,7 @@ def generate_launch_description():
     stereovo_node = Node(
         package=package_name,
         executable='Stereovo_node', # 对应 CMake 中的 add_executable
-        name='stereovo_node',
+        name='Stereovo_node',
         output='screen',
         # 将参数文件作为命令行非 ROS 参数传递（匹配 main 函数中的 non_ros_args[1]）
         arguments=[LaunchConfiguration('config_file')]
