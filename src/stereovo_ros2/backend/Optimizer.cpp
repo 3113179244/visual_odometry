@@ -350,11 +350,11 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
             initial_valid_edges++;
         }
     }
-    double initial_avg_error = std::sqrt(initial_cost / initial_valid_edges);
-    std::cout << "[BA Debug] ===== 优化前 =====" << std::endl;
-    std::cout << "[BA Debug] 关键帧数: " << num_kfs << ", 地图点数: " << num_mps << ", 观测边数: " << edges.size() << std::endl;
-    std::cout << "[BA Debug] 初始平均重投影误差: " << initial_avg_error << " 像素" << std::endl;
-    std::cout << "[BA Debug] =====================" << std::endl;
+    // double initial_avg_error = std::sqrt(initial_cost / initial_valid_edges);
+    // std::cout << "[BA Debug] ===== 优化前 =====" << std::endl;
+    // std::cout << "[BA Debug] 关键帧数: " << num_kfs << ", 地图点数: " << num_mps << ", 观测边数: " << edges.size() << std::endl;
+    // std::cout << "[BA Debug] 初始平均重投影误差: " << initial_avg_error << " 像素" << std::endl;
+    // std::cout << "[BA Debug] =====================" << std::endl;
     // ========== 调试结束 ==========
 
     // 状态备份（用于更新失败回滚）
@@ -525,13 +525,13 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
             new_cost += perr.transpose() * H_prior * perr;
         }
         // ========== 调试：打印每轮迭代总代价 ==========
-        double cost_change = (new_cost - last_cost) / last_cost * 100.0;
-        std::cout << "[BA Debug] iter " << iter
-                  << " | last_cost: " << last_cost
-                  << " | new_cost: " << new_cost
-                  << " | 变化: " << cost_change << "%"
-                  << " | lambda: " << lambda_lm
-                  << std::endl;
+        // double cost_change = (new_cost - last_cost) / last_cost * 100.0;
+        // std::cout << "[BA Debug] iter " << iter
+        //           << " | last_cost: " << last_cost
+        //           << " | new_cost: " << new_cost
+        //           << " | 变化: " << cost_change << "%"
+        //           << " | lambda: " << lambda_lm
+        //           << std::endl;
         // ========== 调试结束 ==========
         // LM阻尼策略
         if (new_cost < last_cost)
@@ -577,11 +577,11 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
     double final_avg_error = std::sqrt(final_cost / final_valid_edges);
     double error_reduction = (initial_avg_error - final_avg_error) / initial_avg_error * 100;
 
-    std::cout << "[BA Debug] ===== 优化后 =====" << std::endl;
-    std::cout << "[BA Debug] 最终平均重投影误差: " << final_avg_error << " 像素" << std::endl;
-    std::cout << "[BA Debug] 误差下降比例: " << error_reduction << " %" << std::endl;
-    std::cout << "[BA Debug] 外点数量(>3px): " << outlier_count << " / " << final_valid_edges << std::endl;
-    std::cout << "[BA Debug] =====================" << std::endl;
+    // std::cout << "[BA Debug] ===== 优化后 =====" << std::endl;
+    // std::cout << "[BA Debug] 最终平均重投影误差: " << final_avg_error << " 像素" << std::endl;
+    // std::cout << "[BA Debug] 误差下降比例: " << error_reduction << " %" << std::endl;
+    // std::cout << "[BA Debug] 外点数量(>3px): " << outlier_count << " / " << final_valid_edges << std::endl;
+    // std::cout << "[BA Debug] =====================" << std::endl;
     // ========== 调试结束 ==========
 
     // ====================== 6. 优化结果写回地图 ======================
