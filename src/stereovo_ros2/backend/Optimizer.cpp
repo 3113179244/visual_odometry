@@ -574,8 +574,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> pMap, int windowSize)
                 outlier_count++;
         }
     }
-    double final_avg_error = std::sqrt(final_cost / final_valid_edges);
-    double error_reduction = (initial_avg_error - final_avg_error) / initial_avg_error * 100;
+    // double final_avg_error = std::sqrt(final_cost / final_valid_edges);
+    // double error_reduction = (initial_avg_error - final_avg_error) / initial_avg_error * 100;
 
     // std::cout << "[BA Debug] ===== 优化后 =====" << std::endl;
     // std::cout << "[BA Debug] 最终平均重投影误差: " << final_avg_error << " 像素" << std::endl;

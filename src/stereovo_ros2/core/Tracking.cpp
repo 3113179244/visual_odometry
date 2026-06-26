@@ -197,6 +197,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     if (isKeyFrame)
     {
         std::map<int, cv::Point2f> currentMeasurements;
+
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
             currentMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
@@ -212,6 +213,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             mNeedOptimize = true;
         }
         mCondBackend.notify_one();
+        mpMap->CullMapPoints();
     }
 
     if (!pnp_succ)
