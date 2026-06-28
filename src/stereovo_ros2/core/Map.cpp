@@ -94,14 +94,4 @@ void Map::CullMapPoints()
             ++it;
         }
     }
-
-    // 打印统计
-    std::cout << "[DEBUG-Map] === 地图点筛选 ===" << std::endl;
-    std::cout << "[DEBUG-Map] 删除: " << cnt_removed_obs + cnt_removed_outlier
-              << " 个 | 剩余: " << mspMapPoints.size() << " 个" << std::endl;
-    std::cout << "[DEBUG-Map]   - 观测次数不足(<" << MIN_OBSERVATIONS << "次): "
-              << cnt_removed_obs << std::endl;
-    std::cout << "[DEBUG-Map]   - 连续外点(>=" << MAX_CONSECUTIVE_OUTLIER << "帧): "
-              << cnt_removed_outlier << std::endl;
-    std::cout << "[DEBUG-Map] ======================" << std::endl;
 }

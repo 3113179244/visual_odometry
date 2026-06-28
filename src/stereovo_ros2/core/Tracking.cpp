@@ -24,7 +24,6 @@ Tracking::Tracking(std::shared_ptr<Map> pMap)
     mBodyTCam1 = Parameters::body_T_cam1;
 
     mCurrentPose = Eigen::Isometry3d::Identity();
-
     mpFeatureDetector = std::make_unique<FeatureDetector>(Parameters::MAX_CNT, Parameters::MIN_DIST, mFlowBack);
 
     mTrackThread = std::thread(&Tracking::TrackLoop, this);
@@ -126,10 +125,8 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         localPose = mCurrentPose;
     }
 
-    // --- A. 第一帧系统初始化 ---
     if (!mIsInitialized)
     {
-        std::cout << ">>> [SLAM前端] 第一帧初始化，固化为初始关键帧。" << std::endl;
         mpFeatureDetector->mvCurPts.clear();
         mpFeatureDetector->mvIds.clear();
         mpFeatureDetector->mvTrackCnt.clear();
@@ -169,35 +166,27 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         return localPose;
     }
 
-    // --- B. 正常帧间状态解算 ---
-    // 1. 稀疏光流帧间追踪
     mpFeatureDetector->TrackFeaturesLK(mPrevImg, grayLeft);
 
-    // 2. PnP 求解当前帧初估位姿
     bool pnp_succ = mpFeatureDetector->EstimatePosePnP(mmIDToMapPoint, mFx, mFy, mCx, mCy, mK1, mK2, mP1, mP2, localPose);
 
-    // 3. 均匀分布特征圈刷新与特征点提取
     mpFeatureDetector->SetMask(grayLeft.rows, grayLeft.cols);
     mpFeatureDetector->AddNewFeatures(grayLeft);
 
-    // 4. 关键帧判定
     bool isKeyFrame = false;
     if (pnp_succ)
     {
         isKeyFrame = NeedNewKeyFrame();
     }
 
-    // 5. 立体匹配与自适应双目三角化
     mpFeatureDetector->TriangulateNewPoints(
         grayLeft, grayRight, localPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
         mK1, mK2, mP1, mP2,
         mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);
 
-    // 6. 固化新关键帧并触发后端 BA
     if (isKeyFrame)
     {
         std::map<int, cv::Point2f> currentMeasurements;
-
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
             currentMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
@@ -218,7 +207,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
     if (!pnp_succ)
     {
-        std::cout << ">>> [SLAM前端] 提示：PnP 暂无足够追踪点，已通过双目三角化构建结构。" << std::endl;
         for (const auto &pair : mmIDToMapPoint)
         {
             vWorldPoints.push_back(pair.second->GetWorldPos());
