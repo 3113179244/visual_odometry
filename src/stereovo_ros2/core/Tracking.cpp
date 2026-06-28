@@ -202,7 +202,8 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             mNeedOptimize = true;
         }
         mCondBackend.notify_one();
-        mpMap->CullMapPoints();
+        mpMap->CullMapPoints();           // 原有代码：剔除坏的、不稳定的地图点
+        mpMap->CullRedundantKeyFrames();  // 新增代码：剔除内存中冗余的历史关键帧
     }
 
     if (!pnp_succ)

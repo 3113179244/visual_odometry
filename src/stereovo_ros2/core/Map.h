@@ -28,6 +28,8 @@ public:
     void Clear();
     // ===== 新增：地图点筛选 =====
     void CullMapPoints();
+    // ===== 新增：冗余关键帧剔除 =====
+    void CullRedundantKeyFrames();
 private:
     std::vector<std::shared_ptr<MapPoint>> mspMapPoints; // 存储全局所有地图点的容器
     std::vector<std::shared_ptr<KeyFrame>> mspKeyFrames; // 新增：存储全局所有关键帧的历史数据库
