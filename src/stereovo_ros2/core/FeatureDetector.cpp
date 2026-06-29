@@ -88,7 +88,6 @@ bool FeatureDetector::EstimatePosePnP(
 {
     if (mvCurPts.empty() || mmIDToMapPoint.empty())
         return false;
-
     std::vector<cv::Point3f> objectPoints;
     std::vector<cv::Point2f> imagePoints;
     std::vector<int> pnpFeatureIndices;
@@ -107,13 +106,11 @@ bool FeatureDetector::EstimatePosePnP(
 
     if (objectPoints.size() < 4)
         return false;
-
     cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
     cv::Mat distCoeffs = (cv::Mat_<double>(4, 1) << k1, k2, p1, p2);
     cv::Mat rvec, tvec;
     std::vector<int> inliers;
     bool pnp_succ = cv::solvePnPRansac(objectPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, 100, 2.0, 0.99, inliers, cv::SOLVEPNP_ITERATIVE);
-
     if (pnp_succ && inliers.size() >= 4)
     {
         cv::Mat R;
@@ -128,7 +125,6 @@ bool FeatureDetector::EstimatePosePnP(
         std::vector<bool> isInlier(mvCurPts.size(), false);
         for (int idx : inliers)
             isInlier[pnpFeatureIndices[idx]] = true;
-
         std::vector<cv::Point2f> compressedPts;
         std::vector<int> compressedIds;
         std::vector<int> compressedTrackCnt;
@@ -138,7 +134,6 @@ bool FeatureDetector::EstimatePosePnP(
             int id = mvIds[k];
             auto it_mp = mmIDToMapPoint.find(id);
             bool has_triangulated = (it_mp != mmIDToMapPoint.end());
-
             if (has_triangulated)
             {
                 if (isInlier[k])
@@ -166,9 +161,15 @@ bool FeatureDetector::EstimatePosePnP(
         mvCurPts = compressedPts;
         mvIds = compressedIds;
         mvTrackCnt = compressedTrackCnt;
+
+        DEBUG_INFO("PnP Tracked Points: " << objectPoints.size()
+                                          << " | Inliers: " << inliers.size()
+                                          << " | Reverted Outliers: " << (objectPoints.size() - inliers.size()));
+
         return true;
     }
 
+    DEBUG_ERROR("PnP Tracking FAILED! Total features: " << objectPoints.size());
     return false;
 }
 

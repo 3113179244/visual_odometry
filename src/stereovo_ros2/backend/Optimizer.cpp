@@ -334,7 +334,6 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         std::vector<double> g_l(numMapPoints, 0.0);
 
         double totalCost = 0.0;
-
         for (const auto &edge : edges)
         {
             int hostStart = edge.hostFrameIdx * 6;
@@ -353,22 +352,18 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                 edge.targetU, edge.targetV,
                 camFx, camFy, camCx, camCy,
                 residual, J_host, J_target, J_lambda);
-
             if (!valid)
                 continue;
-
             double resNorm = residual.norm();
             double huberW = 1.0;
             if (resNorm > edge.huberDelta)
                 huberW = edge.huberDelta / resNorm;
-
             residual *= huberW;
             J_host *= huberW;
             J_target *= huberW;
             J_lambda *= huberW;
 
             totalCost += residual.squaredNorm();
-
             H_xx.block<6, 6>(hostStart, hostStart) += J_host.transpose() * J_host;
             H_xx.block<6, 6>(hostStart, targetStart) += J_host.transpose() * J_target;
             H_xx.block<6, 6>(targetStart, hostStart) += J_target.transpose() * J_host;
@@ -388,7 +383,6 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             Eigen::Matrix<double, 6, 1> priorError = ComputePoseError(
                 priorTranslation, priorRotation,
                 poseTranslation[0], poseRotation[0]);
-
             H_xx.block<6, 6>(firstStart, firstStart) += H_prior;
             g_x.segment<6>(firstStart) += H_prior * priorError;
             totalCost += priorError.transpose() * H_prior * priorError;
@@ -396,12 +390,10 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 
         Eigen::MatrixXd H_schur = H_xx;
         Eigen::VectorXd g_schur = g_x;
-
         for (int j = 0; j < numMapPoints; ++j)
         {
             if (H_ll[j] < 1e-12)
                 continue;
-
             H_schur -= H_xl[j] * H_xl[j].transpose() / H_ll[j];
             g_schur -= H_xl[j] * g_l[j] / H_ll[j];
         }
@@ -409,10 +401,10 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         Eigen::MatrixXd H_reg = H_schur;
         for (int i = 0; i < poseDim; ++i)
             H_reg(i, i) += lambdaLm;
-
         Eigen::LLT<Eigen::MatrixXd> llt(H_reg);
         if (llt.info() != Eigen::Success)
         {
+            DEBUG_WARN("Hessian matrix is singular at iter " << iter << ", expanding lambda.");
             lambdaLm *= lambdaBoost;
             continue;
         }
@@ -465,7 +457,6 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                 edge.targetU, edge.targetV,
                 camFx, camFy, camCx, camCy,
                 r, Jh, Jt, Jl);
-
             double rn = r.norm();
             double w = rn > edge.huberDelta ? edge.huberDelta / rn : 1.0;
             newCost += (r * w).squaredNorm();
@@ -478,21 +469,29 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             newCost += perr.transpose() * H_prior * perr;
         }
 
+        DEBUG_INFO("LBA Iter: " << iter
+                                << " | Prev Cost: " << lastCost
+                                << " | New Cost: " << newCost
+                                << " | Lambda: " << lambdaLm);
+
         if (newCost < lastCost)
         {
             lambdaLm *= lambdaShrink;
             if (fabs(lastCost - newCost) < epsConverge * lastCost)
+            {
+                DEBUG_INFO("LBA converged early at iter " << iter);
                 break;
+            }
         }
         else
         {
+            DEBUG_WARN("Cost increased! Update rejected. Resetting and scaling lambda up.");
             poseTranslation = lastPoseT;
             poseRotation = lastPoseQ;
             invDepthVector = lastInvDepth;
             lambdaLm *= lambdaBoost;
         }
     }
-
     for (int i = 0; i < numKeyFrames; ++i)
     {
         Eigen::Isometry3d TwcOpt = Eigen::Isometry3d::Identity();

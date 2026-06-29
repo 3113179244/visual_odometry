@@ -1,6 +1,24 @@
 #ifndef PARAMETERS_H
 #define PARAMETERS_H
 
+// ==========================================
+// 【全局调试开关】不需要打印时，直接注释掉下面这行
+#define ENABLE_SLAM_DEBUG
+// ==========================================
+
+#ifdef ENABLE_SLAM_DEBUG
+    #include <iostream>
+    // 纯文本输出，无任何控制台颜色字符
+    #define DEBUG_INFO(msg)  std::cout << "[VO-INFO] " << msg << std::endl
+    #define DEBUG_WARN(msg)  std::cout << "[VO-WARN] " << msg << std::endl
+    #define DEBUG_ERROR(msg) std::cerr << "[VO-ERR]  " << msg << std::endl
+#else
+    // 关闭开关时宏为空，编译器自动忽略，实现零运行时开销
+    #define DEBUG_INFO(msg)
+    #define DEBUG_WARN(msg)
+    #define DEBUG_ERROR(msg)
+#endif
+
 #include <string>
 #include <opencv2/opencv.hpp>
 #include <Eigen/Core>
@@ -11,7 +29,6 @@ class Parameters
 public:
     // 读取主函数，传入 kitti_config04-12.yaml 的绝对路径
     static void readParameters(const std::string &config_file);
-
     // 基础参数
     static int IMU;
     static int NUM_OF_CAM;
@@ -42,7 +59,6 @@ public:
     static double MAX_SOLVER_TIME;
     static int MAX_NUM_ITERATIONS;
     static double KEYFRAME_PARALLAX;
-
     // IMU 参数
     static double ACC_N;
     static double GYR_N;

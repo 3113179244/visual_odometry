@@ -140,9 +140,15 @@ private:
                 double time0 = img0_buf_.front()->header.stamp.sec + img0_buf_.front()->header.stamp.nanosec * 1e-9;
                 double time1 = img1_buf_.front()->header.stamp.sec + img1_buf_.front()->header.stamp.nanosec * 1e-9;
                 if (time0 < time1 - 0.003)
+                {
+                    DEBUG_WARN("Left image is too old, popping left. Time diff: " << (time1 - time0));
                     img0_buf_.pop();
+                }
                 else if (time0 > time1 + 0.003)
+                {
+                    DEBUG_WARN("Right image is too old, popping right. Time diff: " << (time0 - time1));
                     img1_buf_.pop();
+                }
                 else
                 {
                     img0 = img0_buf_.front();
@@ -157,7 +163,6 @@ private:
                 }
             }
             m_buf_.unlock();
-
             if (img0 && img1)
             {
                 double sync_time = img0->header.stamp.sec + img0->header.stamp.nanosec * 1e-9;
@@ -165,6 +170,7 @@ private:
                 cv::Mat mat1 = getImageFromMsg(img1);
                 if (!mat0.empty() && !mat1.empty())
                 {
+                    DEBUG_INFO("Stereo synced successfully. Timestamp: " << sync_time);
                     mpTracker->FeedStereoImages(mat0, mat1, sync_time);
                 }
             }
