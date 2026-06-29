@@ -28,8 +28,7 @@ public:
         const Eigen::Isometry3d &Tcw,
         const std::vector<cv::Point2f> &curPts,
         const std::vector<int> &ids,
-        const std::vector<cv::Point2f> &ptsVel
-    )>;
+        const std::vector<cv::Point2f> &ptsVel)>;
 
     Tracking(std::shared_ptr<Map> pMap);
     ~Tracking();
@@ -47,6 +46,8 @@ private:
 
     bool NeedNewKeyFrame();
     void BackendLoop();
+    void CullMapPoints();
+    void CullRedundantKeyFrames();
 
 private:
     bool mIsInitialized;
@@ -81,6 +82,7 @@ private:
     std::mutex mMutexBackend;
     std::condition_variable mCondBackend;
     bool mNeedOptimize;
+    int mnCullCounter = 0;
 };
 
 #endif // TRACKING_H

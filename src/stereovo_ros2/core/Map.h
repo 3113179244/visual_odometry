@@ -5,7 +5,7 @@
 #include <memory>
 #include <mutex>
 #include "core/MapPoint.h"
-#include "core/KeyFrame.h" // 引入新写好的关键帧类
+#include "core/KeyFrame.h"
 
 class Map
 {
@@ -15,26 +15,25 @@ public:
 
     // --- 地图点管理接口 ---
     void AddMapPoint(std::shared_ptr<MapPoint> pMP);
-    std::vector<std::shared_ptr<MapPoint>> GetAllMapPoints();
+    std::vector<std::shared_ptr<MapPoint>> GetAllMapPoints(); // 备用，返回副本
     int GetMapPointsSize();
 
-    // --- 关键帧管理接口（新增） ---
-    // 向地图中插入一帧新的关键帧
+    // --- 关键帧管理接口 ---
     void AddKeyFrame(std::shared_ptr<KeyFrame> pKF);
-    // 获取地图中所有的关键帧
     std::vector<std::shared_ptr<KeyFrame>> GetAllKeyFrames();
 
     // 清空整个地图
     void Clear();
-    // ===== 新增：地图点筛选 =====
-    void CullMapPoints();
-    // ===== 新增：冗余关键帧剔除 =====
-    void CullRedundantKeyFrames();
+
+    // ===== 【新增】暴露可变容器引用和锁，供 Tracking 执行剔除 =====
+    std::vector<std::shared_ptr<MapPoint>>& GetMapPoints() { return mspMapPoints; }
+    std::vector<std::shared_ptr<KeyFrame>>& GetKeyFrames() { return mspKeyFrames; }
+    std::mutex& GetMutex() { return mMutexMap; }
+
 private:
-    std::vector<std::shared_ptr<MapPoint>> mspMapPoints; // 存储全局所有地图点的容器
-    std::vector<std::shared_ptr<KeyFrame>> mspKeyFrames; // 新增：存储全局所有关键帧的历史数据库
-    std::mutex mMutexMap;                                // 地图数据全局互斥锁，保证多线程安全
-    int mnCullCounter = 0;
+    std::vector<std::shared_ptr<MapPoint>> mspMapPoints;
+    std::vector<std::shared_ptr<KeyFrame>> mspKeyFrames;
+    std::mutex mMutexMap;
 };
 
 #endif // MAP_H

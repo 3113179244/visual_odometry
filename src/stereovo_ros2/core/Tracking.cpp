@@ -10,13 +10,13 @@
 /**
  * @file Tracking.cpp
  * @brief 前端视觉里程计核心类实现
- * 
+ *
  * 负责：
  *   - 接收双目图像，执行光流跟踪、PnP位姿估计
  *   - 管理关键帧的创建与地图点的三角化
  *   - 触发后端局部BA优化
  *   - 提供可视化渲染回调
- * 
+ *
  * 主要流程见 ProcessStereo() 函数。
  */
 
@@ -67,7 +67,7 @@ Tracking::~Tracking()
 
 void Tracking::RegisterCallback(RenderCallback cb)
 {
-    mRenderCb = cb;   // 注册可视化回调，由上层（Stereovo_node）实现
+    mRenderCb = cb; // 注册可视化回调，由上层（Stereovo_node）实现
 }
 
 void Tracking::FeedStereoImages(const cv::Mat &imLeft, const cv::Mat &imRight, double timestamp)
@@ -261,8 +261,8 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         mCondBackend.notify_one();
 
         // 清理劣质地图点和冗余关键帧
-        mpMap->CullMapPoints();
-        mpMap->CullRedundantKeyFrames();
+        CullMapPoints();
+        CullRedundantKeyFrames();
     }
 
     // 如果 PnP 失败，至少将已有地图点加入可视化列表
@@ -350,6 +350,113 @@ bool Tracking::NeedNewKeyFrame()
     return average_parallax >= mKeyframeParallax;
 }
 
+void Tracking::CullMapPoints()
+{
+    // 1. 锁定地图数据
+    std::unique_lock<std::mutex> lock(mpMap->GetMutex());
+    auto &mspMapPoints = mpMap->GetMapPoints(); // 注意这里是引用，可直接修改
+
+    // ===== 筛选参数 =====
+    const int MIN_OBSERVATIONS = 2;
+    const int MAX_CONSECUTIVE_OUTLIER = 3;
+
+    int cnt_removed_obs = 0;
+    int cnt_removed_outlier = 0;
+    mnCullCounter++;
+    if (mnCullCounter < 3)
+        return;
+    mnCullCounter = 0;
+
+    auto it = mspMapPoints.begin();
+    while (it != mspMapPoints.end())
+    {
+        auto pMP = *it;
+        if (pMP->IsBad())
+        {
+            it = mspMapPoints.erase(it);
+            continue;
+        }
+
+        bool shouldRemove = false;
+        if (pMP->GetObservationCount() < MIN_OBSERVATIONS)
+        {
+            shouldRemove = true;
+            cnt_removed_obs++;
+        }
+        else if (pMP->GetConsecutiveOutlier() >= MAX_CONSECUTIVE_OUTLIER)
+        {
+            shouldRemove = true;
+            cnt_removed_outlier++;
+        }
+
+        if (shouldRemove)
+        {
+            pMP->SetBad();
+            it = mspMapPoints.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void Tracking::CullRedundantKeyFrames()
+{
+    std::unique_lock<std::mutex> lock(mpMap->GetMutex());
+    auto &mspKeyFrames = mpMap->GetKeyFrames();
+    auto &mspMapPoints = mpMap->GetMapPoints();
+
+    if (mspKeyFrames.size() <= 20)
+        return;
+
+    std::unordered_map<int, std::shared_ptr<MapPoint>> mapIdToMapPoint;
+    for (const auto &mp : mspMapPoints)
+    {
+        mapIdToMapPoint[mp->GetFeatureId()] = mp;
+    }
+
+    auto it = mspKeyFrames.begin();
+    size_t max_search_bound = mspKeyFrames.size() / 3;
+    size_t processed_count = 0;
+
+    while (it != mspKeyFrames.end() && processed_count < max_search_bound)
+    {
+        auto pKF = *it;
+        int total_features = pKF->mmObservations.size();
+        if (total_features == 0)
+        {
+            it = mspKeyFrames.erase(it);
+            continue;
+        }
+
+        int redundant_features_count = 0;
+        for (const auto &obs : pKF->mmObservations)
+        {
+            int mapPointId = obs.first;
+            auto itMp = mapIdToMapPoint.find(mapPointId);
+            if (itMp != mapIdToMapPoint.end())
+            {
+                if (itMp->second->GetObservationCount() > 3)
+                    redundant_features_count++;
+            }
+            else
+            {
+                redundant_features_count++;
+            }
+        }
+
+        if (redundant_features_count > 0.90 * total_features)
+        {
+            it = mspKeyFrames.erase(it);
+        }
+        else
+        {
+            ++it;
+            ++processed_count;
+        }
+    }
+}
 // ==================== 后端优化线程（独立） ====================
 
 void Tracking::BackendLoop()
