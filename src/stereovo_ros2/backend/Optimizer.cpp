@@ -12,6 +12,27 @@
 #include <vector>
 #include <cmath>
 
+/**
+ * @file Optimizer.cpp
+ * @brief 实现局部捆集调整（Local Bundle Adjustment, LBA）
+ * 
+ * 优化目标：
+ *   - 优化滑动窗口内关键帧的位姿（6DOF）
+ *   - 优化窗口内地图点的逆深度（1DOF）
+ *   - 采用舒尔补（Schur complement）加速，先消去逆深度变量
+ *   - 使用 Levenberg-Marquardt 迭代求解
+ * 
+ * 数学细节：
+ *   - 使用观测边缘（ObservationEdge）表示每个特征点在两个关键帧之间的重投影误差
+ *   - 第一帧添加先验约束（边缘化先验信息）来固定尺度
+ *   - 代价函数：Huber 鲁棒核函数
+ */
+
+// ==================== 辅助数学函数 ====================
+
+/**
+ * @brief 构造三维向量的反对称矩阵（用于李代数求导）
+ */
 static inline Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
 {
     Eigen::Matrix3d m;
@@ -21,6 +42,14 @@ static inline Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
     return m;
 }
 
+/**
+ * @brief 根据6维增量更新位姿（平移 + 旋转）
+ * @param oldTranslation  原始平移
+ * @param oldRotation     原始旋转（四元数）
+ * @param delta           6维增量（前3平移，后3旋转（so(3)））
+ * @param newTranslation  更新后的平移
+ * @param newRotation     更新后的旋转
+ */
 static inline void UpdatePose(
     const Eigen::Vector3d &oldTranslation,
     const Eigen::Quaterniond &oldRotation,
@@ -28,8 +57,10 @@ static inline void UpdatePose(
     Eigen::Vector3d &newTranslation,
     Eigen::Quaterniond &newRotation)
 {
+    // 平移更新：在全局坐标系下叠加
     newTranslation = oldTranslation + oldRotation.toRotationMatrix() * delta.head<3>();
 
+    // 旋转更新：用轴角近似（小增量）
     Eigen::Vector3d deltaTheta = delta.tail<3>();
     Eigen::Quaterniond deltaQ(
         1.0,
@@ -42,6 +73,9 @@ static inline void UpdatePose(
     newRotation.normalize();
 }
 
+/**
+ * @brief 计算当前位姿相对于先验位姿的误差（6维）
+ */
 static inline Eigen::Matrix<double, 6, 1> ComputePoseError(
     const Eigen::Vector3d &priorTranslation,
     const Eigen::Quaterniond &priorRotation,
@@ -58,6 +92,10 @@ static inline Eigen::Matrix<double, 6, 1> ComputePoseError(
     return error;
 }
 
+/**
+ * @brief 计算重投影残差及其对位姿和逆深度的雅可比
+ * @return bool 是否有效（Z > 0）
+ */
 static inline bool ComputeReprojectionResidualAndJacobians(
     const Eigen::Vector3d &hostTranslation,
     const Eigen::Quaterniond &hostRotation,
@@ -72,12 +110,13 @@ static inline bool ComputeReprojectionResidualAndJacobians(
     Eigen::Matrix<double, 2, 6> &jacobianTarget,
     Eigen::Matrix<double, 2, 1> &jacobianInvDepth)
 {
+    // 1. 根据host帧的归一化坐标和逆深度重构3D点
     Eigen::Vector3d hostRay(hostUn, hostVn, 1.0);
     double lambda = invDepth;
-
     Eigen::Vector3d pointHost = hostRay / lambda;
     Eigen::Vector3d pointWorld = hostRotation * pointHost + hostTranslation;
 
+    // 2. 将点转换到target帧坐标系
     Eigen::Vector3d pointTarget = targetRotation.inverse() * (pointWorld - targetTranslation);
     double X = pointTarget.x();
     double Y = pointTarget.y();
@@ -95,55 +134,77 @@ static inline bool ComputeReprojectionResidualAndJacobians(
     double invZ = 1.0 / Z;
     double invZ2 = invZ * invZ;
 
+    // 3. 投影雅可比 (2×3)
     Eigen::Matrix<double, 2, 3> jacobianProj;
     jacobianProj << fx * invZ, 0.0, -fx * X * invZ2,
         0.0, fy * invZ, -fy * Y * invZ2;
 
+    // 4. 对target帧位姿的雅可比
     Eigen::Matrix<double, 3, 6> dPointTarget_dXiTarget;
     dPointTarget_dXiTarget.block<3, 3>(0, 0) = -Eigen::Matrix3d::Identity();
     dPointTarget_dXiTarget.block<3, 3>(0, 3) = SkewSymmetric(pointTarget);
-
     jacobianTarget = -jacobianProj * dPointTarget_dXiTarget;
 
+    // 5. 对host帧位姿的雅可比
     Eigen::Matrix<double, 3, 6> dPointWorld_dXiHost;
     dPointWorld_dXiHost.block<3, 3>(0, 0) = hostRotation.toRotationMatrix();
     dPointWorld_dXiHost.block<3, 3>(0, 3) = -hostRotation.toRotationMatrix() * SkewSymmetric(pointHost);
-
     Eigen::Matrix<double, 3, 6> dPointTarget_dXiHost = targetRotation.inverse().toRotationMatrix() * dPointWorld_dXiHost;
-
     jacobianHost = -jacobianProj * dPointTarget_dXiHost;
 
+    // 6. 对逆深度的雅可比
     Eigen::Vector3d dPointHost_dLambda = -hostRay / (lambda * lambda);
     Eigen::Vector3d dPointTarget_dLambda = targetRotation.inverse().toRotationMatrix() * hostRotation.toRotationMatrix() * dPointHost_dLambda;
-
     jacobianInvDepth = -jacobianProj * dPointTarget_dLambda;
 
+    // 7. 计算残差（像素误差）
     double predictedU = fx * X / Z + cx;
     double predictedV = fy * Y / Z + cy;
-
     residual(0) = targetU - predictedU;
     residual(1) = targetV - predictedV;
 
     return true;
 }
 
+// ==================== 观测边数据结构 ====================
+
+/**
+ * @brief 一条重投影观测边，连接 host帧、target帧 和 一个地图点
+ */
 struct ObservationEdge
 {
     int hostFrameIdx;
     int targetFrameIdx;
     int mapPointIdx;
-    double hostUn;
+    double hostUn;    // host帧归一化坐标 (去畸变)
     double hostVn;
-    double targetU;
+    double targetU;   // target帧像素坐标
     double targetV;
-    double huberDelta;
+    double huberDelta; // Huber 阈值（根据观测次数动态调整）
 };
+
+// ==================== 主优化函数 ====================
 
 void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 {
+    /**
+     * @brief 对最近的 windowSize 个关键帧进行局部BA
+     * 
+     * 步骤：
+     *  1. 提取滑动窗口内的关键帧和地图点
+     *  2. 建立观测边（所有窗口内帧的共视关系）
+     *  3. 构建先验（固定第一个关键帧的位姿，加入边缘化信息）
+     *  4. Levenberg-Marquardt 迭代：
+     *     - 计算残差和雅可比
+     *     - 构造 Hessian（含舒尔补）
+     *     - 求解增量，更新状态
+     *     - 若代价下降则接受，否则回退并增大阻尼
+     *  5. 将优化结果写回关键帧和地图点
+     */
     if (!map)
         return;
 
+    // ----- 1. 提取窗口内关键帧 -----
     std::vector<std::shared_ptr<KeyFrame>> allKeyFrames = map->GetAllKeyFrames();
     if (allKeyFrames.size() < 2)
         return;
@@ -156,6 +217,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
     int numKeyFrames = activeKeyFrames.size();
     int poseDim = numKeyFrames * 6;
 
+    // ----- 2. 初始化变量 -----
     std::vector<Eigen::Vector3d> poseTranslation(numKeyFrames);
     std::vector<Eigen::Quaterniond> poseRotation(numKeyFrames);
     std::unordered_map<unsigned long, int> keyFrameIdToIdx;
@@ -173,15 +235,15 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
     double camCx = Parameters::cx;
     double camCy = Parameters::cy;
 
+    // ----- 3. 建立地图点索引和逆深度初始值 -----
     std::vector<std::shared_ptr<MapPoint>> allMapPoints = map->GetAllMapPoints();
     std::unordered_map<int, std::shared_ptr<MapPoint>> mapIdToMapPoint;
-
     for (const auto &mp : allMapPoints)
         mapIdToMapPoint[mp->GetFeatureId()] = mp;
 
     std::unordered_map<int, int> mapPointIdToIdx;
     std::vector<double> invDepthVector;
-    std::vector<int> mapPointHostFrameIdx;
+    std::vector<int> mapPointHostFrameIdx;          // 每个地图点首次被观测到的关键帧索引
     std::vector<std::shared_ptr<MapPoint>> mapPointRefVec;
 
     for (int i = 0; i < numKeyFrames; ++i)
@@ -191,7 +253,6 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         {
             int mapPointId = obs.first;
             auto itMp = mapIdToMapPoint.find(mapPointId);
-
             if (itMp == mapIdToMapPoint.end())
                 continue;
 
@@ -202,6 +263,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                 mapPointHostFrameIdx.push_back(i);
                 mapPointRefVec.push_back(itMp->second);
 
+                // 初值：从host帧反算深度
                 Eigen::Vector3d pointWorld = itMp->second->GetWorldPos();
                 Eigen::Vector3d pointHost = keyFrame->GetPose().inverse() * pointWorld;
                 double depth = pointHost.z() < 0.1 ? 1.0 : pointHost.z();
@@ -211,8 +273,9 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
     }
 
     int numMapPoints = invDepthVector.size();
-    std::vector<ObservationEdge> edges;
 
+    // ----- 4. 构建所有观测边 -----
+    std::vector<ObservationEdge> edges;
     for (int targetIdx = 0; targetIdx < numKeyFrames; ++targetIdx)
     {
         auto keyFrame = activeKeyFrames[targetIdx];
@@ -228,13 +291,15 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             int mpIdx = itMpIdx->second;
             int hostIdx = mapPointHostFrameIdx[mpIdx];
 
-            if (hostIdx == targetIdx)
+            if (hostIdx == targetIdx)  // 跳过自身观测
                 continue;
 
+            // 获取host帧中的观测像素
             cv::Point2f ptHost = activeKeyFrames[hostIdx]->mmObservations[mapPointId];
             double hostUn = (ptHost.x - camCx) / camFx;
             double hostVn = (ptHost.y - camCy) / camFy;
 
+            // 根据地图点观测次数动态调整Huber阈值
             int obsCount = mapPointRefVec[mpIdx]->GetObservationCount();
             double huberDelta = (obsCount >= 5) ? 1.0 : ((obsCount >= 2) ? 1.5 : 3.0);
 
@@ -245,11 +310,13 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         }
     }
 
+    // ----- 5. 构造先验（固定第一个关键帧，边缘化先验信息） -----
     Eigen::Matrix<double, 6, 6> H_prior = Eigen::Matrix<double, 6, 6>::Identity() * 1.0;
     Eigen::Vector3d priorTranslation = poseTranslation[0];
     Eigen::Quaterniond priorRotation = poseRotation[0];
 
     {
+        // 利用第一个关键帧与其观测的地图点构造先验信息（简化版）
         Eigen::Matrix<double, 6, 6> H_mm = Eigen::Matrix<double, 6, 6>::Zero();
         Eigen::Matrix<double, 6, 3> H_mr = Eigen::Matrix<double, 6, 3>::Zero();
         Eigen::Matrix<double, 3, 3> H_rr_sum = Eigen::Matrix<double, 3, 3>::Zero();
@@ -265,7 +332,6 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         {
             int mapPointId = obs.first;
             auto itMp = mapIdToMapPoint.find(mapPointId);
-
             if (itMp == mapIdToMapPoint.end())
                 continue;
 
@@ -305,11 +371,13 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         }
         else
         {
+            // 观测不足时加大先验权重
             H_prior.block<3, 3>(0, 0) *= 50.0;
             H_prior.block<3, 3>(3, 3) *= 100.0;
         }
     }
 
+    // ----- 6. Levenberg-Marquardt 迭代 -----
     double lambdaLm = 1e-3;
     const double lambdaBoost = 10.0;
     const double lambdaShrink = 0.1;
@@ -326,6 +394,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 
     for (int iter = 0; iter < maxIterations; ++iter)
     {
+        // ----- 6.1 构建线性系统（Hessian 和 梯度） -----
         Eigen::MatrixXd H_xx = Eigen::MatrixXd::Zero(poseDim, poseDim);
         Eigen::VectorXd g_x = Eigen::VectorXd::Zero(poseDim);
 
@@ -334,6 +403,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         std::vector<double> g_l(numMapPoints, 0.0);
 
         double totalCost = 0.0;
+
         for (const auto &edge : edges)
         {
             int hostStart = edge.hostFrameIdx * 6;
@@ -352,8 +422,11 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                 edge.targetU, edge.targetV,
                 camFx, camFy, camCx, camCy,
                 residual, J_host, J_target, J_lambda);
+
             if (!valid)
                 continue;
+
+            // Huber 加权
             double resNorm = residual.norm();
             double huberW = 1.0;
             if (resNorm > edge.huberDelta)
@@ -364,6 +437,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             J_lambda *= huberW;
 
             totalCost += residual.squaredNorm();
+
+            // 填充Hessian块（姿势部分）
             H_xx.block<6, 6>(hostStart, hostStart) += J_host.transpose() * J_host;
             H_xx.block<6, 6>(hostStart, targetStart) += J_host.transpose() * J_target;
             H_xx.block<6, 6>(targetStart, hostStart) += J_target.transpose() * J_host;
@@ -372,12 +447,14 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             g_x.segment<6>(hostStart) += J_host.transpose() * residual;
             g_x.segment<6>(targetStart) += J_target.transpose() * residual;
 
+            // 逆深度部分（标量）
             H_ll[mpIdx] += (J_lambda.transpose() * J_lambda)(0, 0);
             H_xl[mpIdx].segment<6>(hostStart) += J_host.transpose() * J_lambda;
             H_xl[mpIdx].segment<6>(targetStart) += J_target.transpose() * J_lambda;
             g_l[mpIdx] += (J_lambda.transpose() * residual)(0, 0);
         }
 
+        // 添加先验项（第一个关键帧）
         {
             int firstStart = 0;
             Eigen::Matrix<double, 6, 1> priorError = ComputePoseError(
@@ -388,6 +465,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             totalCost += priorError.transpose() * H_prior * priorError;
         }
 
+        // ----- 6.2 舒尔补消去逆深度变量 -----
         Eigen::MatrixXd H_schur = H_xx;
         Eigen::VectorXd g_schur = g_x;
         for (int j = 0; j < numMapPoints; ++j)
@@ -398,9 +476,11 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             g_schur -= H_xl[j] * g_l[j] / H_ll[j];
         }
 
+        // ----- 6.3 求解增量（带阻尼） -----
         Eigen::MatrixXd H_reg = H_schur;
         for (int i = 0; i < poseDim; ++i)
             H_reg(i, i) += lambdaLm;
+
         Eigen::LLT<Eigen::MatrixXd> llt(H_reg);
         if (llt.info() != Eigen::Success)
         {
@@ -411,6 +491,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 
         Eigen::VectorXd delta_x = llt.solve(-g_schur);
 
+        // 求解逆深度增量
         Eigen::VectorXd delta_l(numMapPoints);
         for (int j = 0; j < numMapPoints; ++j)
         {
@@ -419,16 +500,17 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                 delta_l(j) = 0.0;
                 continue;
             }
-
             double rhs = -g_l[j] - H_xl[j].dot(delta_x);
             delta_l(j) = rhs / H_ll[j];
         }
 
+        // 保存旧状态用于回退
         lastPoseT = poseTranslation;
         lastPoseQ = poseRotation;
         lastInvDepth = invDepthVector;
         lastCost = totalCost;
 
+        // ----- 6.4 更新状态 -----
         for (int i = 0; i < numKeyFrames; ++i)
         {
             Eigen::Matrix<double, 6, 1> delta = delta_x.segment<6>(i * 6);
@@ -442,6 +524,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             invDepthVector[j] = std::max(minInvDepth, std::min(maxInvDepth, invDepthVector[j]));
         }
 
+        // ----- 6.5 计算新代价并决定接受/拒绝 -----
         double newCost = 0.0;
         for (const auto &edge : edges)
         {
@@ -457,11 +540,13 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                 edge.targetU, edge.targetV,
                 camFx, camFy, camCx, camCy,
                 r, Jh, Jt, Jl);
+
             double rn = r.norm();
             double w = rn > edge.huberDelta ? edge.huberDelta / rn : 1.0;
             newCost += (r * w).squaredNorm();
         }
 
+        // 先验代价
         {
             Eigen::Matrix<double, 6, 1> perr = ComputePoseError(
                 priorTranslation, priorRotation,
@@ -485,6 +570,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         }
         else
         {
+            // 拒绝更新，回退状态，增大阻尼
             DEBUG_WARN("Cost increased! Update rejected. Resetting and scaling lambda up.");
             poseTranslation = lastPoseT;
             poseRotation = lastPoseQ;
@@ -492,6 +578,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             lambdaLm *= lambdaBoost;
         }
     }
+
+    // ----- 7. 将优化结果写回关键帧和地图点 -----
     for (int i = 0; i < numKeyFrames; ++i)
     {
         Eigen::Isometry3d TwcOpt = Eigen::Isometry3d::Identity();
