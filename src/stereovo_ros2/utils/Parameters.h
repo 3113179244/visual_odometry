@@ -3,7 +3,7 @@
 
 // ==========================================
 // 【全局调试开关】不需要打印时，直接注释掉下面这行
-#define ENABLE_SLAM_DEBUG
+// #define ENABLE_SLAM_DEBUG
 // ==========================================
 
 #ifdef ENABLE_SLAM_DEBUG

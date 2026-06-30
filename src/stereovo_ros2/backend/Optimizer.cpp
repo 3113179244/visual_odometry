@@ -5,33 +5,17 @@
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <Eigen/Cholesky>
+#include <ceres/ceres.h> // 引入 Ceres 头文件
 
 #include <map>
 #include <unordered_map>
 #include <vector>
 #include <cmath>
 
-/**
- * @file Optimizer.cpp
- * @brief 实现局部捆集调整（Local Bundle Adjustment, LBA）
- * 
- * 优化目标：
- *   - 优化滑动窗口内关键帧的位姿（6DOF）
- *   - 优化窗口内地图点的逆深度（1DOF）
- *   - 采用舒尔补（Schur complement）加速，先消去逆深度变量
- *   - 使用 Levenberg-Marquardt 迭代求解
- * 
- * 数学细节：
- *   - 使用观测边缘（ObservationEdge）表示每个特征点在两个关键帧之间的重投影误差
- *   - 第一帧添加先验约束（边缘化先验信息）来固定尺度
- *   - 代价函数：Huber 鲁棒核函数
- */
-
 // ==================== 辅助数学函数 ====================
 
 /**
- * @brief 构造三维向量的反对称矩阵（用于李代数求导）
+ * @brief 构造三维向量的反对称矩阵
  */
 static inline Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
 {
@@ -43,58 +27,7 @@ static inline Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
 }
 
 /**
- * @brief 根据6维增量更新位姿（平移 + 旋转）
- * @param oldTranslation  原始平移
- * @param oldRotation     原始旋转（四元数）
- * @param delta           6维增量（前3平移，后3旋转（so(3)））
- * @param newTranslation  更新后的平移
- * @param newRotation     更新后的旋转
- */
-static inline void UpdatePose(
-    const Eigen::Vector3d &oldTranslation,
-    const Eigen::Quaterniond &oldRotation,
-    const Eigen::Matrix<double, 6, 1> &delta,
-    Eigen::Vector3d &newTranslation,
-    Eigen::Quaterniond &newRotation)
-{
-    // 平移更新：在全局坐标系下叠加
-    newTranslation = oldTranslation + oldRotation.toRotationMatrix() * delta.head<3>();
-
-    // 旋转更新：用轴角近似（小增量）
-    Eigen::Vector3d deltaTheta = delta.tail<3>();
-    Eigen::Quaterniond deltaQ(
-        1.0,
-        deltaTheta.x() / 2.0,
-        deltaTheta.y() / 2.0,
-        deltaTheta.z() / 2.0);
-    deltaQ.normalize();
-
-    newRotation = oldRotation * deltaQ;
-    newRotation.normalize();
-}
-
-/**
- * @brief 计算当前位姿相对于先验位姿的误差（6维）
- */
-static inline Eigen::Matrix<double, 6, 1> ComputePoseError(
-    const Eigen::Vector3d &priorTranslation,
-    const Eigen::Quaterniond &priorRotation,
-    const Eigen::Vector3d &currentTranslation,
-    const Eigen::Quaterniond &currentRotation)
-{
-    Eigen::Matrix<double, 6, 1> error;
-    error.head<3>() = priorRotation.inverse().toRotationMatrix() * (currentTranslation - priorTranslation);
-
-    Eigen::Quaterniond qRel = priorRotation.inverse() * currentRotation;
-    Eigen::AngleAxisd aaRel(qRel);
-    error.tail<3>() = aaRel.angle() * aaRel.axis();
-
-    return error;
-}
-
-/**
  * @brief 计算重投影残差及其对位姿和逆深度的雅可比
- * @return bool 是否有效（Z > 0）
  */
 static inline bool ComputeReprojectionResidualAndJacobians(
     const Eigen::Vector3d &hostTranslation,
@@ -110,13 +43,11 @@ static inline bool ComputeReprojectionResidualAndJacobians(
     Eigen::Matrix<double, 2, 6> &jacobianTarget,
     Eigen::Matrix<double, 2, 1> &jacobianInvDepth)
 {
-    // 1. 根据host帧的归一化坐标和逆深度重构3D点
     Eigen::Vector3d hostRay(hostUn, hostVn, 1.0);
     double lambda = invDepth;
     Eigen::Vector3d pointHost = hostRay / lambda;
     Eigen::Vector3d pointWorld = hostRotation * pointHost + hostTranslation;
 
-    // 2. 将点转换到target帧坐标系
     Eigen::Vector3d pointTarget = targetRotation.inverse() * (pointWorld - targetTranslation);
     double X = pointTarget.x();
     double Y = pointTarget.y();
@@ -124,40 +55,31 @@ static inline bool ComputeReprojectionResidualAndJacobians(
 
     if (Z < 1e-4)
     {
-        residual.setConstant(1111.0);
-        jacobianHost.setZero();
-        jacobianTarget.setZero();
-        jacobianInvDepth.setZero();
         return false;
     }
 
     double invZ = 1.0 / Z;
     double invZ2 = invZ * invZ;
 
-    // 3. 投影雅可比 (2×3)
     Eigen::Matrix<double, 2, 3> jacobianProj;
     jacobianProj << fx * invZ, 0.0, -fx * X * invZ2,
         0.0, fy * invZ, -fy * Y * invZ2;
 
-    // 4. 对target帧位姿的雅可比
     Eigen::Matrix<double, 3, 6> dPointTarget_dXiTarget;
     dPointTarget_dXiTarget.block<3, 3>(0, 0) = -Eigen::Matrix3d::Identity();
     dPointTarget_dXiTarget.block<3, 3>(0, 3) = SkewSymmetric(pointTarget);
     jacobianTarget = -jacobianProj * dPointTarget_dXiTarget;
 
-    // 5. 对host帧位姿的雅可比
     Eigen::Matrix<double, 3, 6> dPointWorld_dXiHost;
     dPointWorld_dXiHost.block<3, 3>(0, 0) = hostRotation.toRotationMatrix();
     dPointWorld_dXiHost.block<3, 3>(0, 3) = -hostRotation.toRotationMatrix() * SkewSymmetric(pointHost);
     Eigen::Matrix<double, 3, 6> dPointTarget_dXiHost = targetRotation.inverse().toRotationMatrix() * dPointWorld_dXiHost;
     jacobianHost = -jacobianProj * dPointTarget_dXiHost;
 
-    // 6. 对逆深度的雅可比
     Eigen::Vector3d dPointHost_dLambda = -hostRay / (lambda * lambda);
     Eigen::Vector3d dPointTarget_dLambda = targetRotation.inverse().toRotationMatrix() * hostRotation.toRotationMatrix() * dPointHost_dLambda;
     jacobianInvDepth = -jacobianProj * dPointTarget_dLambda;
 
-    // 7. 计算残差（像素误差）
     double predictedU = fx * X / Z + cx;
     double predictedV = fy * Y / Z + cy;
     residual(0) = targetU - predictedU;
@@ -166,41 +88,131 @@ static inline bool ComputeReprojectionResidualAndJacobians(
     return true;
 }
 
-// ==================== 观测边数据结构 ====================
+// ==================== Ceres 参数块与局部参数化定义 ====================
 
 /**
- * @brief 一条重投影观测边，连接 host帧、target帧 和 一个地图点
+ * @brief Ceres 自定义参数化更新：针对包含 [平移(3维), 四元数(4维)] 共7维数据的位姿块进行乘法流形更新
+ * 对应原手写代码中的 UpdatePose。
  */
-struct ObservationEdge
+class PoseLocalParameterization : public ceres::LocalParameterization
 {
-    int hostFrameIdx;
-    int targetFrameIdx;
-    int mapPointIdx;
-    double hostUn;    // host帧归一化坐标 (去畸变)
-    double hostVn;
-    double targetU;   // target帧像素坐标
-    double targetV;
-    double huberDelta; // Huber 阈值（根据观测次数动态调整）
+public:
+    virtual ~PoseLocalParameterization() {}
+    virtual bool Plus(const double *x, const double *delta, double *x_plus_delta) const
+    {
+        Eigen::Map<const Eigen::Vector3d> oldTranslation(x);
+        Eigen::Map<const Eigen::Quaterniond> oldRotation(x + 3);
+
+        Eigen::Map<const Eigen::Matrix<double, 6, 1>> deltaPose(delta);
+
+        Eigen::Map<Eigen::Vector3d> newTranslation(x_plus_delta);
+        Eigen::Map<Eigen::Quaterniond> newRotation(x_plus_delta + 3);
+
+        // 保持原 UpdatePose 的李代数左/右乘叠加逻辑
+        newTranslation = oldTranslation + oldRotation.toRotationMatrix() * deltaPose.head<3>();
+
+        Eigen::Vector3d deltaTheta = deltaPose.tail<3>();
+        Eigen::Quaterniond deltaQ(1.0, deltaTheta.x() / 2.0, deltaTheta.y() / 2.0, deltaTheta.z() / 2.0);
+        deltaQ.normalize();
+
+        newRotation = oldRotation * deltaQ;
+        newRotation.normalize();
+        return true;
+    }
+    virtual bool ComputeJacobian(const double *x, double *jacobian) const
+    {
+        // 告诉 Ceres 7维状态对6维切空间增量的雅可比（由于解析残差里已经直接对 6DOF 状态求导，这里填恒等阵即可映射）
+        Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> J(jacobian);
+        J.setIdentity();
+        return true;
+    }
+    virtual int GlobalSize() const { return 7; } // 3平移 + 4四元数
+    virtual int LocalSize() const { return 6; }  // 6自由度位姿
+};
+
+// ==================== Ceres 残差块定义 ====================
+
+/**
+ * @brief 重投影误差 Ceres 协同代价函数
+ */
+class ReprojectionCostFunction : public ceres::CostFunction
+{
+public:
+    ReprojectionCostFunction(double hostUn, double hostVn, double targetU, double targetV,
+                             double fx, double fy, double cx, double cy)
+        : hostUn_(hostUn), hostVn_(hostVn), targetU_(targetU), targetV_(targetV),
+          fx_(fx), fy_(fy), cx_(cx), cy_(cy)
+    {
+        // 参数块 0: Host 帧位姿 (7维)
+        mutable_parameter_block_sizes()->push_back(7);
+        // 参数块 1: Target 帧位姿 (7维)
+        mutable_parameter_block_sizes()->push_back(7);
+        // 参数块 2: 逆深度 (1维)
+        mutable_parameter_block_sizes()->push_back(1);
+        // 残差维数: 2维 (u, v 像素误差)
+        set_num_residuals(2);
+    }
+
+    virtual bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
+    {
+        Eigen::Map<const Eigen::Vector3d> hostT(parameters[0]);
+        Eigen::Map<const Eigen::Quaterniond> hostQ(parameters[0] + 3);
+
+        Eigen::Map<const Eigen::Vector3d> targetT(parameters[1]);
+        Eigen::Map<const Eigen::Quaterniond> targetQ(parameters[1] + 3);
+
+        double invDepth = parameters[2][0];
+
+        Eigen::Vector2d res;
+        Eigen::Matrix<double, 2, 6> J_host;
+        Eigen::Matrix<double, 2, 6> J_target;
+        Eigen::Matrix<double, 2, 1> J_invDepth;
+
+        bool valid = ComputeReprojectionResidualAndJacobians(
+            hostT, hostQ, targetT, targetQ, invDepth,
+            hostUn_, hostVn_, targetU_, targetV_,
+            fx_, fy_, cx_, cy_, res, J_host, J_target, J_invDepth);
+
+        if (!valid)
+            return false;
+
+        // 填入残差
+        residuals[0] = res(0);
+        residuals[1] = res(1);
+
+        // 填入解析雅可比矩阵 (Ceres要求行优先储存 RowMajor)
+        if (jacobians)
+        {
+            if (jacobians[0]) // 对 Host 位姿的导数 (2 x 7)
+            {
+                Eigen::Map<Eigen::Matrix<double, 2, 7, Eigen::RowMajor>> J0(jacobians[0]);
+                J0.setZero();
+                J0.block<2, 6>(0, 0) = J_host; // 映射前6维自由度
+            }
+            if (jacobians[1]) // 对 Target 位姿的导数 (2 x 7)
+            {
+                Eigen::Map<Eigen::Matrix<double, 2, 7, Eigen::RowMajor>> J1(jacobians[1]);
+                J1.setZero();
+                J1.block<2, 6>(0, 0) = J_target;
+            }
+            if (jacobians[2]) // 对 逆深度 的导数 (2 x 1)
+            {
+                Eigen::Map<Eigen::Matrix<double, 2, 1>> J2(jacobians[2]);
+                J2 = J_invDepth;
+            }
+        }
+        return true;
+    }
+
+private:
+    double hostUn_, hostVn_, targetU_, targetV_;
+    double fx_, fy_, cx_, cy_;
 };
 
 // ==================== 主优化函数 ====================
 
 void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 {
-    /**
-     * @brief 对最近的 windowSize 个关键帧进行局部BA
-     * 
-     * 步骤：
-     *  1. 提取滑动窗口内的关键帧和地图点
-     *  2. 建立观测边（所有窗口内帧的共视关系）
-     *  3. 构建先验（固定第一个关键帧的位姿，加入边缘化信息）
-     *  4. Levenberg-Marquardt 迭代：
-     *     - 计算残差和雅可比
-     *     - 构造 Hessian（含舒尔补）
-     *     - 求解增量，更新状态
-     *     - 若代价下降则接受，否则回退并增大阻尼
-     *  5. 将优化结果写回关键帧和地图点
-     */
     if (!map)
         return;
 
@@ -215,18 +227,26 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         activeKeyFrames.push_back(allKeyFrames[i]);
 
     int numKeyFrames = activeKeyFrames.size();
-    int poseDim = numKeyFrames * 6;
 
-    // ----- 2. 初始化变量 -----
-    std::vector<Eigen::Vector3d> poseTranslation(numKeyFrames);
-    std::vector<Eigen::Quaterniond> poseRotation(numKeyFrames);
+    // ----- 2. 初始化变量数组 (Ceres 优化变量通常用连续内存 double 数组) -----
+    // 每个位姿 7维：[x, y, z, qx, qy, qz, qw]
+    std::vector<std::vector<double>> poseBlocks(numKeyFrames, std::vector<double>(7));
     std::unordered_map<unsigned long, int> keyFrameIdToIdx;
 
     for (int i = 0; i < numKeyFrames; ++i)
     {
         Eigen::Isometry3d Twc = activeKeyFrames[i]->GetPose();
-        poseTranslation[i] = Twc.translation();
-        poseRotation[i] = Eigen::Quaterniond(Twc.rotation());
+        Eigen::Vector3d t = Twc.translation();
+        Eigen::Quaterniond q(Twc.rotation());
+
+        poseBlocks[i][0] = t.x();
+        poseBlocks[i][1] = t.y();
+        poseBlocks[i][2] = t.z();
+        poseBlocks[i][3] = q.x();
+        poseBlocks[i][4] = q.y();
+        poseBlocks[i][5] = q.z();
+        poseBlocks[i][6] = q.w();
+
         keyFrameIdToIdx[activeKeyFrames[i]->mId] = i;
     }
 
@@ -243,7 +263,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 
     std::unordered_map<int, int> mapPointIdToIdx;
     std::vector<double> invDepthVector;
-    std::vector<int> mapPointHostFrameIdx;          // 每个地图点首次被观测到的关键帧索引
+    std::vector<int> mapPointHostFrameIdx;
     std::vector<std::shared_ptr<MapPoint>> mapPointRefVec;
 
     for (int i = 0; i < numKeyFrames; ++i)
@@ -263,7 +283,6 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                 mapPointHostFrameIdx.push_back(i);
                 mapPointRefVec.push_back(itMp->second);
 
-                // 初值：从host帧反算深度
                 Eigen::Vector3d pointWorld = itMp->second->GetWorldPos();
                 Eigen::Vector3d pointHost = keyFrame->GetPose().inverse() * pointWorld;
                 double depth = pointHost.z() < 0.1 ? 1.0 : pointHost.z();
@@ -272,10 +291,19 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         }
     }
 
-    int numMapPoints = invDepthVector.size();
+    // ----- 4. 构建 Ceres 问题并添加残差块 -----
+    ceres::Problem problem;
+    
+    PoseLocalParameterization* poseParameterization = new PoseLocalParameterization();
 
-    // ----- 4. 构建所有观测边 -----
-    std::vector<ObservationEdge> edges;
+    for (int i = 0; i < numKeyFrames; ++i)
+    {
+        problem.AddParameterBlock(poseBlocks[i].data(), 7, poseParameterization);
+    }
+    // 1. 固定第一帧相机位姿块
+    problem.SetParameterBlockConstant(poseBlocks[0].data());
+
+    // 建立所有观测误差边
     for (int targetIdx = 0; targetIdx < numKeyFrames; ++targetIdx)
     {
         auto keyFrame = activeKeyFrames[targetIdx];
@@ -291,303 +319,75 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             int mpIdx = itMpIdx->second;
             int hostIdx = mapPointHostFrameIdx[mpIdx];
 
-            if (hostIdx == targetIdx)  // 跳过自身观测
+            if (hostIdx == targetIdx) 
                 continue;
 
-            // 获取host帧中的观测像素
             cv::Point2f ptHost = activeKeyFrames[hostIdx]->mmObservations[mapPointId];
             double hostUn = (ptHost.x - camCx) / camFx;
             double hostVn = (ptHost.y - camCy) / camFy;
 
-            // 根据地图点观测次数动态调整Huber阈值
             int obsCount = mapPointRefVec[mpIdx]->GetObservationCount();
-            double huberDelta = (obsCount >= 5) ? 1.0 : ((obsCount >= 2) ? 1.5 : 3.0);
+            double huberDelta = (obsCount >= 5) ? 0.5 : ((obsCount >= 2) ? 1.0 : 1.5);
 
-            edges.push_back({hostIdx, targetIdx, mpIdx,
-                             hostUn, hostVn,
-                             ptTarget.x, ptTarget.y,
-                             huberDelta});
-        }
-    }
+            ceres::CostFunction* costFunction = new ReprojectionCostFunction(
+                hostUn, hostVn, ptTarget.x, ptTarget.y, camFx, camFy, camCx, camCy);
+            
+            ceres::LossFunction* lossFunction = new ceres::HuberLoss(huberDelta);
 
-    // ----- 5. 构造先验（固定第一个关键帧，边缘化先验信息） -----
-    Eigen::Matrix<double, 6, 6> H_prior = Eigen::Matrix<double, 6, 6>::Identity() * 1.0;
-    Eigen::Vector3d priorTranslation = poseTranslation[0];
-    Eigen::Quaterniond priorRotation = poseRotation[0];
-
-    {
-        // 利用第一个关键帧与其观测的地图点构造先验信息（简化版）
-        Eigen::Matrix<double, 6, 6> H_mm = Eigen::Matrix<double, 6, 6>::Zero();
-        Eigen::Matrix<double, 6, 3> H_mr = Eigen::Matrix<double, 6, 3>::Zero();
-        Eigen::Matrix<double, 3, 3> H_rr_sum = Eigen::Matrix<double, 3, 3>::Zero();
-
-        double pixelNoiseSigma = 1.5;
-        double omegaPixel = 1.0 / (pixelNoiseSigma * pixelNoiseSigma);
-        int effectiveObsCount = 0;
-
-        Eigen::Isometry3d TwcPrior = activeKeyFrames[0]->GetPose();
-        Eigen::Matrix3d R_prior = TwcPrior.rotation();
-
-        for (const auto &obs : activeKeyFrames[0]->mmObservations)
-        {
-            int mapPointId = obs.first;
-            auto itMp = mapIdToMapPoint.find(mapPointId);
-            if (itMp == mapIdToMapPoint.end())
-                continue;
-
-            Eigen::Vector3d pointWorld = itMp->second->GetWorldPos();
-            Eigen::Vector3d pointCamera = TwcPrior.inverse() * pointWorld;
-            double X = pointCamera.x();
-            double Y = pointCamera.y();
-            double Z = pointCamera.z();
-
-            if (Z < 0.2)
-                continue;
-
-            effectiveObsCount++;
-
-            Eigen::Matrix<double, 2, 3> jacobianProj;
-            double invZ = 1.0 / Z;
-            double invZ2 = invZ * invZ;
-            jacobianProj << camFx * invZ, 0.0, -camFx * X * invZ2,
-                0.0, camFy * invZ, -camFy * Y * invZ2;
-
-            Eigen::Matrix<double, 3, 6> jacobianPose;
-            jacobianPose.block<3, 3>(0, 0) = -R_prior.transpose();
-            jacobianPose.block<3, 3>(0, 3) = SkewSymmetric(pointCamera);
-            Eigen::Matrix<double, 2, 6> J_pose = jacobianProj * jacobianPose;
-
-            Eigen::Matrix<double, 2, 3> J_point = jacobianProj * R_prior.transpose();
-
-            H_mm += J_pose.transpose() * omegaPixel * J_pose;
-            H_mr += J_pose.transpose() * omegaPixel * J_point;
-            H_rr_sum += J_point.transpose() * omegaPixel * J_point;
-        }
-
-        if (effectiveObsCount > 4)
-        {
-            Eigen::Matrix3d H_rr_inv = H_rr_sum.inverse();
-            H_prior += H_mm - H_mr * H_rr_inv * H_mr.transpose();
-        }
-        else
-        {
-            // 观测不足时加大先验权重
-            H_prior.block<3, 3>(0, 0) *= 50.0;
-            H_prior.block<3, 3>(3, 3) *= 100.0;
-        }
-    }
-
-    // ----- 6. Levenberg-Marquardt 迭代 -----
-    double lambdaLm = 1e-3;
-    const double lambdaBoost = 10.0;
-    const double lambdaShrink = 0.1;
-    const int maxIterations = 10;
-    const double epsConverge = 1e-6;
-
-    std::vector<Eigen::Vector3d> lastPoseT = poseTranslation;
-    std::vector<Eigen::Quaterniond> lastPoseQ = poseRotation;
-    std::vector<double> lastInvDepth = invDepthVector;
-    double lastCost = 0.0;
-
-    const double minInvDepth = 0.001;
-    const double maxInvDepth = 10.0;
-
-    for (int iter = 0; iter < maxIterations; ++iter)
-    {
-        // ----- 6.1 构建线性系统（Hessian 和 梯度） -----
-        Eigen::MatrixXd H_xx = Eigen::MatrixXd::Zero(poseDim, poseDim);
-        Eigen::VectorXd g_x = Eigen::VectorXd::Zero(poseDim);
-
-        std::vector<double> H_ll(numMapPoints, 0.0);
-        std::vector<Eigen::VectorXd> H_xl(numMapPoints, Eigen::VectorXd::Zero(poseDim));
-        std::vector<double> g_l(numMapPoints, 0.0);
-
-        double totalCost = 0.0;
-
-        for (const auto &edge : edges)
-        {
-            int hostStart = edge.hostFrameIdx * 6;
-            int targetStart = edge.targetFrameIdx * 6;
-            int mpIdx = edge.mapPointIdx;
-
-            Eigen::Vector2d residual;
-            Eigen::Matrix<double, 2, 6> J_host, J_target;
-            Eigen::Matrix<double, 2, 1> J_lambda;
-
-            bool valid = ComputeReprojectionResidualAndJacobians(
-                poseTranslation[edge.hostFrameIdx], poseRotation[edge.hostFrameIdx],
-                poseTranslation[edge.targetFrameIdx], poseRotation[edge.targetFrameIdx],
-                invDepthVector[mpIdx],
-                edge.hostUn, edge.hostVn,
-                edge.targetU, edge.targetV,
-                camFx, camFy, camCx, camCy,
-                residual, J_host, J_target, J_lambda);
-
-            if (!valid)
-                continue;
-
-            // Huber 加权
-            double resNorm = residual.norm();
-            double huberW = 1.0;
-            if (resNorm > edge.huberDelta)
-                huberW = edge.huberDelta / resNorm;
-            residual *= huberW;
-            J_host *= huberW;
-            J_target *= huberW;
-            J_lambda *= huberW;
-
-            totalCost += residual.squaredNorm();
-
-            // 填充Hessian块（姿势部分）
-            H_xx.block<6, 6>(hostStart, hostStart) += J_host.transpose() * J_host;
-            H_xx.block<6, 6>(hostStart, targetStart) += J_host.transpose() * J_target;
-            H_xx.block<6, 6>(targetStart, hostStart) += J_target.transpose() * J_host;
-            H_xx.block<6, 6>(targetStart, targetStart) += J_target.transpose() * J_target;
-
-            g_x.segment<6>(hostStart) += J_host.transpose() * residual;
-            g_x.segment<6>(targetStart) += J_target.transpose() * residual;
-
-            // 逆深度部分（标量）
-            H_ll[mpIdx] += (J_lambda.transpose() * J_lambda)(0, 0);
-            H_xl[mpIdx].segment<6>(hostStart) += J_host.transpose() * J_lambda;
-            H_xl[mpIdx].segment<6>(targetStart) += J_target.transpose() * J_lambda;
-            g_l[mpIdx] += (J_lambda.transpose() * residual)(0, 0);
-        }
-
-        // 添加先验项（第一个关键帧）
-        {
-            int firstStart = 0;
-            Eigen::Matrix<double, 6, 1> priorError = ComputePoseError(
-                priorTranslation, priorRotation,
-                poseTranslation[0], poseRotation[0]);
-            H_xx.block<6, 6>(firstStart, firstStart) += H_prior;
-            g_x.segment<6>(firstStart) += H_prior * priorError;
-            totalCost += priorError.transpose() * H_prior * priorError;
-        }
-
-        // ----- 6.2 舒尔补消去逆深度变量 -----
-        Eigen::MatrixXd H_schur = H_xx;
-        Eigen::VectorXd g_schur = g_x;
-        for (int j = 0; j < numMapPoints; ++j)
-        {
-            if (H_ll[j] < 1e-12)
-                continue;
-            H_schur -= H_xl[j] * H_xl[j].transpose() / H_ll[j];
-            g_schur -= H_xl[j] * g_l[j] / H_ll[j];
-        }
-
-        // ----- 6.3 求解增量（带阻尼） -----
-        Eigen::MatrixXd H_reg = H_schur;
-        for (int i = 0; i < poseDim; ++i)
-            H_reg(i, i) += lambdaLm;
-
-        Eigen::LLT<Eigen::MatrixXd> llt(H_reg);
-        if (llt.info() != Eigen::Success)
-        {
-            DEBUG_WARN("Hessian matrix is singular at iter " << iter << ", expanding lambda.");
-            lambdaLm *= lambdaBoost;
-            continue;
-        }
-
-        Eigen::VectorXd delta_x = llt.solve(-g_schur);
-
-        // 求解逆深度增量
-        Eigen::VectorXd delta_l(numMapPoints);
-        for (int j = 0; j < numMapPoints; ++j)
-        {
-            if (H_ll[j] < 1e-12)
+            problem.AddResidualBlock(costFunction, lossFunction, 
+                                     poseBlocks[hostIdx].data(), 
+                                     poseBlocks[targetIdx].data(), 
+                                     &invDepthVector[mpIdx]);
+            
+            // 2. 关键改动：如果该点第一次是在第一帧（hostIdx == 0）被看到的，直接把它的逆深度也锁死！
+            // 这样就等价于你原先手写代码里加强烈先验的效果，死死保住系统的绝对尺度（Scale）
+            if (hostIdx == 0)
             {
-                delta_l(j) = 0.0;
-                continue;
+                problem.SetParameterBlockConstant(&invDepthVector[mpIdx]);
             }
-            double rhs = -g_l[j] - H_xl[j].dot(delta_x);
-            delta_l(j) = rhs / H_ll[j];
-        }
-
-        // 保存旧状态用于回退
-        lastPoseT = poseTranslation;
-        lastPoseQ = poseRotation;
-        lastInvDepth = invDepthVector;
-        lastCost = totalCost;
-
-        // ----- 6.4 更新状态 -----
-        for (int i = 0; i < numKeyFrames; ++i)
-        {
-            Eigen::Matrix<double, 6, 1> delta = delta_x.segment<6>(i * 6);
-            UpdatePose(poseTranslation[i], poseRotation[i], delta,
-                       poseTranslation[i], poseRotation[i]);
-        }
-
-        for (int j = 0; j < numMapPoints; ++j)
-        {
-            invDepthVector[j] += delta_l(j);
-            invDepthVector[j] = std::max(minInvDepth, std::min(maxInvDepth, invDepthVector[j]));
-        }
-
-        // ----- 6.5 计算新代价并决定接受/拒绝 -----
-        double newCost = 0.0;
-        for (const auto &edge : edges)
-        {
-            Eigen::Vector2d r;
-            Eigen::Matrix<double, 2, 6> Jh, Jt;
-            Eigen::Matrix<double, 2, 1> Jl;
-
-            ComputeReprojectionResidualAndJacobians(
-                poseTranslation[edge.hostFrameIdx], poseRotation[edge.hostFrameIdx],
-                poseTranslation[edge.targetFrameIdx], poseRotation[edge.targetFrameIdx],
-                invDepthVector[edge.mapPointIdx],
-                edge.hostUn, edge.hostVn,
-                edge.targetU, edge.targetV,
-                camFx, camFy, camCx, camCy,
-                r, Jh, Jt, Jl);
-
-            double rn = r.norm();
-            double w = rn > edge.huberDelta ? edge.huberDelta / rn : 1.0;
-            newCost += (r * w).squaredNorm();
-        }
-
-        // 先验代价
-        {
-            Eigen::Matrix<double, 6, 1> perr = ComputePoseError(
-                priorTranslation, priorRotation,
-                poseTranslation[0], poseRotation[0]);
-            newCost += perr.transpose() * H_prior * perr;
-        }
-
-        DEBUG_INFO("LBA Iter: " << iter
-                                << " | Prev Cost: " << lastCost
-                                << " | New Cost: " << newCost
-                                << " | Lambda: " << lambdaLm);
-
-        if (newCost < lastCost)
-        {
-            lambdaLm *= lambdaShrink;
-            if (fabs(lastCost - newCost) < epsConverge * lastCost)
+            else
             {
-                DEBUG_INFO("LBA converged early at iter " << iter);
-                break;
+                // 其余后续帧看到的点正常优化，但要限制边界防止退化
+                problem.SetParameterLowerBound(&invDepthVector[mpIdx], 0, 0.001);
+                problem.SetParameterUpperBound(&invDepthVector[mpIdx], 0, 10.0);
             }
         }
-        else
-        {
-            // 拒绝更新，回退状态，增大阻尼
-            DEBUG_WARN("Cost increased! Update rejected. Resetting and scaling lambda up.");
-            poseTranslation = lastPoseT;
-            poseRotation = lastPoseQ;
-            invDepthVector = lastInvDepth;
-            lambdaLm *= lambdaBoost;
-        }
     }
+
+    // ----- 5. 配置 Ceres 求解器选项 -----
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::DENSE_SCHUR; 
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT; 
+    
+    // 3. 优化迭代策略：给足迭代次数，同时松开不必要的严苛公差，兼顾速度与完全收敛
+    options.max_num_iterations = 15; 
+    options.function_tolerance = 1e-4; 
+    options.parameter_tolerance = 1e-4;
+    options.minimizer_progress_to_stdout = false;
+
+    // ----- 6. 执行优化并打印 Ceres 报告 -----
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+
+    // 打印 Ceres 优化报告
+    std::cout << "================== Ceres LBA Report ==================\n";
+    std::cout << summary.FullReport() << "\n";
+    std::cout << "======================================================\n";
 
     // ----- 7. 将优化结果写回关键帧和地图点 -----
     for (int i = 0; i < numKeyFrames; ++i)
     {
+        Eigen::Vector3d t(poseBlocks[i][0], poseBlocks[i][1], poseBlocks[i][2]);
+        Eigen::Quaterniond q(poseBlocks[i][6], poseBlocks[i][3], poseBlocks[i][4], poseBlocks[i][5]); // 注意 Ceres 里的顺序或是 Eigen 赋值
+        q.normalize();
+
         Eigen::Isometry3d TwcOpt = Eigen::Isometry3d::Identity();
-        TwcOpt.linear() = poseRotation[i].toRotationMatrix();
-        TwcOpt.translation() = poseTranslation[i];
+        TwcOpt.linear() = q.toRotationMatrix();
+        TwcOpt.translation() = t;
         activeKeyFrames[i]->SetPose(TwcOpt);
     }
 
+    int numMapPoints = invDepthVector.size();
     for (int j = 0; j < numMapPoints; ++j)
     {
         double lambdaOpt = invDepthVector[j];
@@ -599,8 +399,12 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         double hostVn = (ptHost.y - camCy) / camFy;
 
         Eigen::Vector3d hostRayScaled(hostUn, hostVn, 1.0);
-        Eigen::Vector3d posWorldOpt = poseRotation[hostIdx] * (hostRayScaled / lambdaOpt) + poseTranslation[hostIdx];
 
+        // 重新获取优化后的位姿用于更新3D世界点坐标
+        Eigen::Vector3d tHost(poseBlocks[hostIdx][0], poseBlocks[hostIdx][1], poseBlocks[hostIdx][2]);
+        Eigen::Quaterniond qHost(poseBlocks[hostIdx][6], poseBlocks[hostIdx][3], poseBlocks[hostIdx][4], poseBlocks[hostIdx][5]);
+
+        Eigen::Vector3d posWorldOpt = qHost * (hostRayScaled / lambdaOpt) + tHost;
         mapPointRefVec[j]->SetWorldPos(posWorldOpt);
     }
 }
