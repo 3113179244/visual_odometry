@@ -293,8 +293,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 
     // ----- 4. 构建 Ceres 问题并添加残差块 -----
     ceres::Problem problem;
-    
-    PoseLocalParameterization* poseParameterization = new PoseLocalParameterization();
+
+    PoseLocalParameterization *poseParameterization = new PoseLocalParameterization();
 
     for (int i = 0; i < numKeyFrames; ++i)
     {
@@ -319,7 +319,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             int mpIdx = itMpIdx->second;
             int hostIdx = mapPointHostFrameIdx[mpIdx];
 
-            if (hostIdx == targetIdx) 
+            if (hostIdx == targetIdx)
                 continue;
 
             cv::Point2f ptHost = activeKeyFrames[hostIdx]->mmObservations[mapPointId];
@@ -329,39 +329,29 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             int obsCount = mapPointRefVec[mpIdx]->GetObservationCount();
             double huberDelta = (obsCount >= 5) ? 0.5 : ((obsCount >= 2) ? 1.0 : 1.5);
 
-            ceres::CostFunction* costFunction = new ReprojectionCostFunction(
+            ceres::CostFunction *costFunction = new ReprojectionCostFunction(
                 hostUn, hostVn, ptTarget.x, ptTarget.y, camFx, camFy, camCx, camCy);
-            
-            ceres::LossFunction* lossFunction = new ceres::HuberLoss(huberDelta);
 
-            problem.AddResidualBlock(costFunction, lossFunction, 
-                                     poseBlocks[hostIdx].data(), 
-                                     poseBlocks[targetIdx].data(), 
+            ceres::LossFunction *lossFunction = new ceres::HuberLoss(huberDelta);
+
+            problem.AddResidualBlock(costFunction, lossFunction,
+                                     poseBlocks[hostIdx].data(),
+                                     poseBlocks[targetIdx].data(),
                                      &invDepthVector[mpIdx]);
-            
-            // 2. 关键改动：如果该点第一次是在第一帧（hostIdx == 0）被看到的，直接把它的逆深度也锁死！
-            // 这样就等价于你原先手写代码里加强烈先验的效果，死死保住系统的绝对尺度（Scale）
-            if (hostIdx == 0)
-            {
-                problem.SetParameterBlockConstant(&invDepthVector[mpIdx]);
-            }
-            else
-            {
-                // 其余后续帧看到的点正常优化，但要限制边界防止退化
-                problem.SetParameterLowerBound(&invDepthVector[mpIdx], 0, 0.001);
-                problem.SetParameterUpperBound(&invDepthVector[mpIdx], 0, 10.0);
-            }
+
+            problem.SetParameterLowerBound(&invDepthVector[mpIdx], 0, 0.001);
+            problem.SetParameterUpperBound(&invDepthVector[mpIdx], 0, 10.0);
         }
     }
 
     // ----- 5. 配置 Ceres 求解器选项 -----
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::DENSE_SCHUR; 
-    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT; 
-    
+    options.linear_solver_type = ceres::DENSE_SCHUR;
+    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+
     // 3. 优化迭代策略：给足迭代次数，同时松开不必要的严苛公差，兼顾速度与完全收敛
-    options.max_num_iterations = 15; 
-    options.function_tolerance = 1e-4; 
+    options.max_num_iterations = 15;
+    options.function_tolerance = 1e-4;
     options.parameter_tolerance = 1e-4;
     options.minimizer_progress_to_stdout = false;
 

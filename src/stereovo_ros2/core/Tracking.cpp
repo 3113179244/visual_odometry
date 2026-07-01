@@ -178,26 +178,37 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         mpFeatureDetector->mvIds.clear();
         mpFeatureDetector->mvTrackCnt.clear();
         mmIDToMapPoint.clear();
+
         localPose = Eigen::Isometry3d::Identity();
+
+        // 1. 提取左目第一批初始特征点
         mpFeatureDetector->AddNewFeatures(grayLeft);
         mpFeatureDetector->mvPtsVel.resize(mpFeatureDetector->mvCurPts.size(), cv::Point2f(0.0f, 0.0f));
         mPrevTime = timestamp;
         mPrevImg = grayLeft.clone();
 
-        // 创建第一个关键帧（所有特征作为观测）
+        // 2. 【新增核心】在第一帧立即进行双目匹配与三角化，构建初始 3D 地图点
+        // 第一帧作为世界坐标系原点，传入 localPose (Identity)
+        mpFeatureDetector->TriangulateNewPoints(
+            grayLeft, grayRight, localPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
+            mK1, mK2, mP1, mP2,
+            mmIDToMapPoint, mpMap, true, vWorldPoints, imgTrack);
+
+        // 3. 创建第一个关键帧（收集当前帧成功生成 3D 地图点或被观测到的特征）
         std::map<int, cv::Point2f> initMeasurements;
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
             initMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
         }
 
+        // 注意：传入的位姿是相机的逆位姿 T_w_c
         auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose.inverse(), initMeasurements);
         mpMap->AddKeyFrame(pKF);
 
         mvpPrevKFPointsMap = initMeasurements;
         mIsInitialized = true;
 
-        // 绘制特征点
+        // 4. 绘制特征点
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
             double len = std::min(1.0, 1.0 * mpFeatureDetector->mvTrackCnt[i] / 20.0);
