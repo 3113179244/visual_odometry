@@ -421,6 +421,9 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
             }
         }
     }
+    // ================== 【新增：打印提取后的特征点总数】 ==================
+    std::cout << "[VO-TRACK-DEBUG] 当前图像帧保留/提取的特征点总数: " << mvCurPts.size() << std::endl;
+    // ====================================================================
 }
 
 void FeatureDetector::UpdatePreviousStatus(const cv::Mat &grayLeft)
