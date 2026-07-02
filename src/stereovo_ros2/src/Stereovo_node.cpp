@@ -480,27 +480,24 @@ private:
         header.stamp.sec = static_cast<int32_t>(timestamp);
         header.stamp.nanosec = static_cast<uint32_t>((timestamp - header.stamp.sec) * 1e9);
 
-        Eigen::Matrix3d R_ros_cam;
-        R_ros_cam << 0, 0, 1,
-            -1, 0, 0,
-            0, -1, 0;
-
+        // 提取完全对齐的 OpenCV 相机物理位姿 T_w_c
         Eigen::Isometry3d Twc = Tcw.inverse();
-
-        // 提取原始相机系的位姿（算法核心解算出来的物理轨迹）
         Eigen::Vector3d P_cam = Twc.translation();
         Eigen::Matrix3d R_cam = Twc.rotation();
 
-        // 转换解算出的里程计位姿到 ROS 标准三维空间（仅供 ROS RViz 话题显示）
+        // 转换解算出的里程计位姿到 ROS 标准三维空间（右-前-上 仅供 ROS RViz 话题显示）
+        Eigen::Matrix3d R_ros_cam;
+        R_ros_cam << 0, 0, 1,
+                    -1, 0, 0,
+                     0, -1, 0;
+
         Eigen::Vector3d P_ros = R_ros_cam * P_cam;
         Eigen::Matrix3d R_ros = R_ros_cam * R_cam * R_ros_cam.transpose();
         Eigen::Quaterniond Q_ros(R_ros);
 
         PublishLatestOdometry(P_ros, Q_ros, timestamp);
-
-        // 同时把 ROS 位姿 and 原始相机位姿传进去
+        // 传递 ROS 位姿以及原生纯净的相机位姿
         PublishOdometry(header, P_ros, Q_ros, P_cam, R_cam);
-
         PublishCameraPose(header, P_ros, Q_ros);
         PublishPointCloud(header, vWorldPoints);
         PublishKeyPoses(header, vKFPositions);

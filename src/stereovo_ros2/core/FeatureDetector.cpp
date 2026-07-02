@@ -227,17 +227,23 @@ void FeatureDetector::TriangulateNewPoints(
         cv::undistortPoints(mvRightPts, mvRightPtsUn, cameraMatrix, distCoeffs, cv::Mat(), cameraMatrix);
     }
 
-    Eigen::Matrix4d T_w_body = currentPose.inverse().matrix();
-    Eigen::Matrix4d T_w_c0 = T_w_body * bodyTCam0;
-    Eigen::Matrix4d T_w_c1 = T_w_body * bodyTCam1;
+    // 明确定义：currentPose 是由 PnP 求解出的 T_c0_w (世界到当前帧左目相机)
+    Eigen::Matrix4d T_c0_w = currentPose.matrix();
+    
+    // 利用相对外参计算世界到右目相机 c1 的变换矩阵 T_c1_w
+    // T_c1_w = T_c1_c0 * T_c0_w = (body_T_cam1)^-1 * body_T_cam0 * T_c0_w
+    Eigen::Matrix4d T_c1_w = bodyTCam1.inverse() * bodyTCam0 * T_c0_w;
+
+    // 提取其逆矩阵 T_w_c0 和 T_w_c1，用于后续 SVD 方程构建
+    Eigen::Matrix4d T_w_c0 = T_c0_w.inverse();
+    Eigen::Matrix4d T_w_c1 = T_w_c1.inverse();
+
     Eigen::Vector3d t_c0 = bodyTCam0.block<3, 1>(0, 3);
     Eigen::Vector3d t_c1 = bodyTCam1.block<3, 1>(0, 3);
     double baseline = (t_c1 - t_c0).norm();
     if (baseline < 1e-4)
         baseline = 0.53715;
     double max_reliable_depth = (fx * baseline) / 1.2;
-    Eigen::Matrix4d T_c0_w = T_w_c0.inverse();
-    Eigen::Matrix4d T_c1_w = T_w_c1.inverse();
 
     const double SVD_RATIO_THRESH = 0.1;
     const double REPROJ_ERR_THRESH = 1.0;

@@ -201,8 +201,9 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             initMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
         }
 
-        // 注意：传入的位姿是相机的逆位姿 T_w_c
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose.inverse(), initMeasurements);
+        // 第一帧 localPose 为单位阵，代表当前相机坐标系即为世界坐标系原点。
+        // 传入的位姿直接就是 localPose 即可，不需要求逆
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, initMeasurements);
         mpMap->AddKeyFrame(pKF);
 
         mvpPrevKFPointsMap = initMeasurements;
@@ -416,7 +417,7 @@ void Tracking::CullMapPoints()
             Eigen::Vector3d pos = pMP->GetWorldPos();
 
             // 打印该地图点随着相机移动而被淘汰的动态信息
-            std::cout << "[MapPoint Cull] ❌ 淘汰点 ID: " << mpId 
+            std::cout << "[MapPoint Cull] ❌ 淘汰点 ID: " << mpId
                       << " | 空间坐标: [" << pos.x() << ", " << pos.y() << ", " << pos.z() << "]"
                       << " | 淘汰原因: " << reason << std::endl;
 
@@ -432,13 +433,13 @@ void Tracking::CullMapPoints()
     // 打印当前整体地图规模的动态变化统计
     if (cnt_removed_obs > 0 || cnt_removed_outlier > 0)
     {
-        std::cout << ">>> [Map Dynamic Log] 📊 地图点规模变化: 历史总数 " << initial_points_count 
-                  << " -> 剩余有效点 " << mspMapPoints.size() 
-                  << " | 本次移除共视滑出点: " << cnt_removed_obs 
-                  << " | 本次移除漂移错配点: " << cnt_removed_outlier << "\n" << std::endl;
+        std::cout << ">>> [Map Dynamic Log] 📊 地图点规模变化: 历史总数 " << initial_points_count
+                  << " -> 剩余有效点 " << mspMapPoints.size()
+                  << " | 本次移除共视滑出点: " << cnt_removed_obs
+                  << " | 本次移除漂移错配点: " << cnt_removed_outlier << "\n"
+                  << std::endl;
     }
 }
-
 
 void Tracking::CullRedundantKeyFrames()
 {

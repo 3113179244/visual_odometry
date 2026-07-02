@@ -365,12 +365,13 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
     // std::cout << "======================================================\n";
 
     // ----- 7. 将优化结果写回关键帧和地图点 -----
+    // ----- 7. 将优化结果写回关键帧和地图点 -----
     for (int i = 0; i < numKeyFrames; ++i)
     {
         Eigen::Vector3d t(poseBlocks[i][0], poseBlocks[i][1], poseBlocks[i][2]);
-        Eigen::Quaterniond q(poseBlocks[i][6], poseBlocks[i][3], poseBlocks[i][4], poseBlocks[i][5]); // 注意 Ceres 里的顺序或是 Eigen 赋值
+        // 修复四元数构造顺序，Eigen标量构造顺序严格为 (w, x, y, z)
+        Eigen::Quaterniond q(poseBlocks[i][6], poseBlocks[i][3], poseBlocks[i][4], poseBlocks[i][5]); 
         q.normalize();
-
         Eigen::Isometry3d TwcOpt = Eigen::Isometry3d::Identity();
         TwcOpt.linear() = q.toRotationMatrix();
         TwcOpt.translation() = t;
@@ -389,11 +390,11 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         double hostVn = (ptHost.y - camCy) / camFy;
 
         Eigen::Vector3d hostRayScaled(hostUn, hostVn, 1.0);
-
         // 重新获取优化后的位姿用于更新3D世界点坐标
         Eigen::Vector3d tHost(poseBlocks[hostIdx][0], poseBlocks[hostIdx][1], poseBlocks[hostIdx][2]);
         Eigen::Quaterniond qHost(poseBlocks[hostIdx][6], poseBlocks[hostIdx][3], poseBlocks[hostIdx][4], poseBlocks[hostIdx][5]);
-
+        qHost.normalize(); // 确保写回时四元数已归一化
+        
         Eigen::Vector3d posWorldOpt = qHost * (hostRayScaled / lambdaOpt) + tHost;
         mapPointRefVec[j]->SetWorldPos(posWorldOpt);
     }
