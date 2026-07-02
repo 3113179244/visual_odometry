@@ -360,9 +360,9 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
     ceres::Solve(options, &problem, &summary);
 
     // 打印 Ceres 优化报告
-    std::cout << "================== Ceres LBA Report ==================\n";
-    std::cout << summary.FullReport() << "\n";
-    std::cout << "======================================================\n";
+    // std::cout << "================== Ceres LBA Report ==================\n";
+    // std::cout << summary.FullReport() << "\n";
+    // std::cout << "======================================================\n";
 
     // ----- 7. 将优化结果写回关键帧和地图点 -----
     for (int i = 0; i < numKeyFrames; ++i)
