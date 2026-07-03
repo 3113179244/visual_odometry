@@ -125,3 +125,68 @@ for delta = 1 (frames) using consecutive pairs
 
 --------------------------------------------------------------------------------
 Plotting results... 
+
+evo_ape kitti 08.txt trajectory.txt -va --plot --plot_mode xyz 
+--------------------------------------------------------------------------------
+Loaded 4071 poses from: 08.txt
+Loaded 4071 poses from: trajectory.txt
+--------------------------------------------------------------------------------
+Aligning using Umeyama's method...
+Rotation of alignment:
+[[ 0.9997276  -0.01139693 -0.02036758]
+ [ 0.01148787  0.99992453  0.0043536 ]
+ [ 0.02031643 -0.00458639  0.99978308]]
+Translation of alignment:
+[ 1.86191491 -3.13624683 -7.05570285]
+Scale correction: 1.0
+--------------------------------------------------------------------------------
+Compared 4071 absolute pose pairs.
+Calculating APE for translation part pose relation...
+--------------------------------------------------------------------------------
+APE w.r.t. translation part (m)
+(with SE(3) Umeyama alignment)
+
+       max	14.162915
+      mean	4.291656
+    median	3.309293
+       min	0.463788
+      rmse	5.037090
+       sse	103290.537389
+       std	2.637036
+
+--------------------------------------------------------------------------------
+Plotting results... 
+
+evo_rpe kitti 08.txt trajectory.txt -va --plot --plot_mode xyz 
+--------------------------------------------------------------------------------
+Loaded 4071 poses from: 08.txt
+Loaded 4071 poses from: trajectory.txt
+--------------------------------------------------------------------------------
+Aligning using Umeyama's method...
+Rotation of alignment:
+[[ 0.9997276  -0.01139693 -0.02036758]
+ [ 0.01148787  0.99992453  0.0043536 ]
+ [ 0.02031643 -0.00458639  0.99978308]]
+Translation of alignment:
+[ 1.86191491 -3.13624683 -7.05570285]
+Scale correction: 1.0
+--------------------------------------------------------------------------------
+Found 4070 pairs with delta 1 (frames) among 4071 poses using consecutive pairs.
+Compared 4070 relative pose pairs, delta = 1 (frames) with consecutive pairs.
+Calculating RPE for translation part pose relation...
+--------------------------------------------------------------------------------
+RPE w.r.t. translation part (m)
+for delta = 1 (frames) using consecutive pairs
+(with SE(3) Umeyama alignment)
+
+       max	0.921275
+      mean	0.028061
+    median	0.018525
+       min	0.000772
+      rmse	0.048025
+       sse	9.387207
+       std	0.038975
+
+--------------------------------------------------------------------------------
+Plotting results... 
+

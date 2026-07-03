@@ -372,15 +372,11 @@ void Tracking::CullMapPoints()
     const int MIN_OBSERVATIONS = 2;
     const int MAX_CONSECUTIVE_OUTLIER = 3;
 
-    int cnt_removed_obs = 0;
-    int cnt_removed_outlier = 0;
+    // 每 3 次调用执行一次清理
     mnCullCounter++;
     if (mnCullCounter < 3)
         return;
     mnCullCounter = 0;
-
-    // 记录清理前的地图点总数
-    size_t initial_points_count = mspMapPoints.size();
 
     auto it = mspMapPoints.begin();
     while (it != mspMapPoints.end())
@@ -393,34 +389,20 @@ void Tracking::CullMapPoints()
         }
 
         bool shouldRemove = false;
-        std::string reason = ""; // 用于记录被剔除的原因
 
         // 核心动态变化判断 1：观测该点的关键帧过少（说明它已经滑出了滑窗内关键帧的共视范围）
         if (pMP->GetObservationCount() < MIN_OBSERVATIONS)
         {
             shouldRemove = true;
-            cnt_removed_obs++;
-            reason = "共视断开 (观测到该点的关键帧少于 " + std::to_string(MIN_OBSERVATIONS) + " 帧)";
         }
         // 核心动态变化判断 2：该点在当前的 PnP 求解中连续被判定为外点（说明发生了追踪漂移或错配）
         else if (pMP->GetConsecutiveOutlier() >= MAX_CONSECUTIVE_OUTLIER)
         {
             shouldRemove = true;
-            cnt_removed_outlier++;
-            reason = "优化外点 (连续 RANSAC 误匹配达 " + std::to_string(MAX_CONSECUTIVE_OUTLIER) + " 次)";
         }
 
         if (shouldRemove)
         {
-            // 实时捕获该点的特征 ID 和三维世界坐标
-            int mpId = pMP->GetFeatureId();
-            Eigen::Vector3d pos = pMP->GetWorldPos();
-
-            // 打印该地图点随着相机移动而被淘汰的动态信息
-            std::cout << "[MapPoint Cull] ❌ 淘汰点 ID: " << mpId
-                      << " | 空间坐标: [" << pos.x() << ", " << pos.y() << ", " << pos.z() << "]"
-                      << " | 淘汰原因: " << reason << std::endl;
-
             pMP->SetBad();
             it = mspMapPoints.erase(it);
         }
@@ -428,16 +410,6 @@ void Tracking::CullMapPoints()
         {
             ++it;
         }
-    }
-
-    // 打印当前整体地图规模的动态变化统计
-    if (cnt_removed_obs > 0 || cnt_removed_outlier > 0)
-    {
-        std::cout << ">>> [Map Dynamic Log] 📊 地图点规模变化: 历史总数 " << initial_points_count
-                  << " -> 剩余有效点 " << mspMapPoints.size()
-                  << " | 本次移除共视滑出点: " << cnt_removed_obs
-                  << " | 本次移除漂移错配点: " << cnt_removed_outlier << "\n"
-                  << std::endl;
     }
 }
 
