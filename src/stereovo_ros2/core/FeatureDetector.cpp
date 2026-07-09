@@ -236,7 +236,7 @@ void FeatureDetector::TriangulateNewPoints(
 
     // 提取其逆矩阵 T_w_c0 和 T_w_c1，用于后续 SVD 方程构建
     Eigen::Matrix4d T_w_c0 = T_c0_w.inverse();
-    Eigen::Matrix4d T_w_c1 = T_w_c1.inverse();
+    Eigen::Matrix4d T_w_c1 = T_c1_w.inverse();
 
     Eigen::Vector3d t_c0 = bodyTCam0.block<3, 1>(0, 3);
     Eigen::Vector3d t_c1 = bodyTCam1.block<3, 1>(0, 3);
