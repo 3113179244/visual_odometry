@@ -217,7 +217,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             cv::circle(imgTrack, mpFeatureDetector->mvCurPts[i], 2, ptColor, 2);
         }
 
-        vKFPositions.push_back(localPose.translation());
+        vKFPositions.push_back(localPose.inverse().translation());
         mpFeatureDetector->UpdatePreviousStatus(grayLeft);
 
         {
@@ -261,7 +261,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             currentMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
         }
 
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, currentMeasurements);
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose.inverse(), currentMeasurements);
         mpMap->AddKeyFrame(pKF);
         mvpPrevKFPointsMap = currentMeasurements;
 
