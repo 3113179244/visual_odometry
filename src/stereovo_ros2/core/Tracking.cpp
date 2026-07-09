@@ -203,7 +203,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
         // 第一帧 localPose 为单位阵，代表当前相机坐标系即为世界坐标系原点。
         // 传入的位姿直接就是 localPose 即可，不需要求逆
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, initMeasurements);
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose.inverse(), initMeasurements);
         mpMap->AddKeyFrame(pKF);
 
         mvpPrevKFPointsMap = initMeasurements;
