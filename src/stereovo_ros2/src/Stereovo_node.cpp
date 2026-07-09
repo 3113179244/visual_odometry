@@ -481,7 +481,7 @@ private:
         header.stamp.nanosec = static_cast<uint32_t>((timestamp - header.stamp.sec) * 1e9);
 
         // 提取完全对齐的 OpenCV 相机物理位姿 T_w_c
-        Eigen::Isometry3d Twc = Tcw.inverse();
+        Eigen::Isometry3d Twc = Tcw;
         Eigen::Vector3d P_cam = Twc.translation();
         Eigen::Matrix3d R_cam = Twc.rotation();
 
