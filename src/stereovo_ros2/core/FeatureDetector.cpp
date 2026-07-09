@@ -229,7 +229,7 @@ void FeatureDetector::TriangulateNewPoints(
 
     // 明确定义：currentPose 是由 PnP 求解出的 T_c0_w (世界到当前帧左目相机)
     Eigen::Matrix4d T_c0_w = currentPose.matrix();
-    
+
     // 利用相对外参计算世界到右目相机 c1 的变换矩阵 T_c1_w
     // T_c1_w = T_c1_c0 * T_c0_w = (body_T_cam1)^-1 * body_T_cam0 * T_c0_w
     Eigen::Matrix4d T_c1_w = bodyTCam1.inverse() * bodyTCam0 * T_c0_w;
@@ -414,14 +414,23 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
                 for (const auto &pt : nPts)
                 {
                     cv::Point2f global_pt(pt.x + x, pt.y + y);
-                    if (mMask.at<uchar>(global_pt) == 255)
+
+                    // Explicitly round to integer coordinates to prevent out-of-bound truncation bugs
+                    int ix = cvRound(global_pt.x);
+                    int iy = cvRound(global_pt.y);
+
+                    // Safeguard check against image borders
+                    if (ix >= 0 && ix < mMask.cols && iy >= 0 && iy < mMask.rows)
                     {
-                        mvCurPts.push_back(global_pt);
-                        mvIds.push_back(mNextId++);
-                        mvTrackCnt.push_back(1);
-                        cv::circle(mMask, global_pt, mMinDist, 0, -1);
-                        if ((int)mvCurPts.size() >= mMaxCnt)
-                            return;
+                        if (mMask.at<uchar>(iy, ix) == 255) // safe element access using (row, col) syntax
+                        {
+                            mvCurPts.push_back(global_pt);
+                            mvIds.push_back(mNextId++);
+                            mvTrackCnt.push_back(1);
+                            cv::circle(mMask, global_pt, mMinDist, 0, -1);
+                            if ((int)mvCurPts.size() >= mMaxCnt)
+                                return;
+                        }
                     }
                 }
             }
