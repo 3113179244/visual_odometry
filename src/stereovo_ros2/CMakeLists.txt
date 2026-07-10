@@ -39,7 +39,7 @@ find_package(image_transport REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(Eigen3 REQUIRED)
-
+find_package(Sophus REQUIRED)
 # -----------------------------------------------------------------------------
 # 3. 头文件包含路径
 # -----------------------------------------------------------------------------
@@ -49,6 +49,7 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
   ${CERES_INCLUDE_DIRS}
+  ${Sophus_INCLUDE_DIRS}
   /usr/local/TensorRT/include
   ${YOLOV8_CODE_DIR}/include     
   ${YOLOV8_CODE_DIR}/plugin      
@@ -80,6 +81,7 @@ add_library(${PROJECT_NAME}_lib
 target_link_libraries(${PROJECT_NAME}_lib 
   ${OpenCV_LIBS} 
   ${CERES_LIBRARIES} 
+  Sophus::Sophus
   nvinfer                      
   cudart                       
 )

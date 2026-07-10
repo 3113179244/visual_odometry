@@ -11,7 +11,8 @@
 #include <unordered_map>
 #include <vector>
 #include <cmath>
-
+#include <sophus/se3.hpp>
+#include <sophus/so3.hpp>
 // ==================== 辅助数学函数 ====================
 
 /**
@@ -27,7 +28,8 @@ static inline Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
 }
 
 /**
- * @brief 计算重投影残差及其对位姿和逆深度的雅可比
+ * @brief 计算重投影残差及其对位姿和逆深度的雅可比 (完全基于 Sophus 右扰动模型规范化)
+ * 位姿变化定义为: T_target_w * T_w_host
  */
 static inline bool ComputeReprojectionResidualAndJacobians(
     const Eigen::Vector3d &hostTranslation,
@@ -43,12 +45,17 @@ static inline bool ComputeReprojectionResidualAndJacobians(
     Eigen::Matrix<double, 2, 6> &jacobianTarget,
     Eigen::Matrix<double, 2, 1> &jacobianInvDepth)
 {
+    // 使用 Sophus 构造位姿
+    Sophus::SE3d T_w_host(hostRotation, hostTranslation);
+    Sophus::SE3d T_w_target(targetRotation, targetTranslation);
+    Sophus::SE3d T_target_host = T_w_target.inverse() * T_w_host;
+
     Eigen::Vector3d hostRay(hostUn, hostVn, 1.0);
     double lambda = invDepth;
     Eigen::Vector3d pointHost = hostRay / lambda;
-    Eigen::Vector3d pointWorld = hostRotation * pointHost + hostTranslation;
 
-    Eigen::Vector3d pointTarget = targetRotation.inverse() * (pointWorld - targetTranslation);
+    // 投影到目标帧
+    Eigen::Vector3d pointTarget = T_target_host * pointHost;
     double X = pointTarget.x();
     double Y = pointTarget.y();
     double Z = pointTarget.z();
@@ -61,25 +68,31 @@ static inline bool ComputeReprojectionResidualAndJacobians(
     double invZ = 1.0 / Z;
     double invZ2 = invZ * invZ;
 
+    // 像素对相机坐标系 3D 点的导数
     Eigen::Matrix<double, 2, 3> jacobianProj;
     jacobianProj << fx * invZ, 0.0, -fx * X * invZ2,
-        0.0, fy * invZ, -fy * Y * invZ2;
+                    0.0, fy * invZ, -fy * Y * invZ2;
 
+    // 1. 对 Target 帧位姿的导数 (基于右扰动: T_w_target * exp(delta^wedge))
+    // d(pointTarget) / d(delta_target) = - [I, -pointTarget^wedge]
     Eigen::Matrix<double, 3, 6> dPointTarget_dXiTarget;
     dPointTarget_dXiTarget.block<3, 3>(0, 0) = -Eigen::Matrix3d::Identity();
-    dPointTarget_dXiTarget.block<3, 3>(0, 3) = SkewSymmetric(pointTarget);
+    dPointTarget_dXiTarget.block<3, 3>(0, 3) = Sophus::SO3d::hat(pointTarget);
     jacobianTarget = -jacobianProj * dPointTarget_dXiTarget;
 
-    Eigen::Matrix<double, 3, 6> dPointWorld_dXiHost;
-    dPointWorld_dXiHost.block<3, 3>(0, 0) = hostRotation.toRotationMatrix();
-    dPointWorld_dXiHost.block<3, 3>(0, 3) = -hostRotation.toRotationMatrix() * SkewSymmetric(pointHost);
-    Eigen::Matrix<double, 3, 6> dPointTarget_dXiHost = targetRotation.inverse().toRotationMatrix() * dPointWorld_dXiHost;
+    // 2. 对 Host 帧位姿的导数 (基于右扰动: T_w_host * exp(delta^wedge))
+    // d(pointTarget) / d(delta_host) = R_target_host * [I, -pointHost^wedge]
+    Eigen::Matrix<double, 3, 6> dPointTarget_dXiHost;
+    dPointTarget_dXiHost.block<3, 3>(0, 0) = T_target_host.rotationMatrix();
+    dPointTarget_dXiHost.block<3, 3>(0, 3) = -T_target_host.rotationMatrix() * Sophus::SO3d::hat(pointHost);
     jacobianHost = -jacobianProj * dPointTarget_dXiHost;
 
+    // 3. 对逆深度的导数
     Eigen::Vector3d dPointHost_dLambda = -hostRay / (lambda * lambda);
-    Eigen::Vector3d dPointTarget_dLambda = targetRotation.inverse().toRotationMatrix() * hostRotation.toRotationMatrix() * dPointHost_dLambda;
+    Eigen::Vector3d dPointTarget_dLambda = T_target_host.rotationMatrix() * dPointHost_dLambda;
     jacobianInvDepth = -jacobianProj * dPointTarget_dLambda;
 
+    // 计算残差
     double predictedU = fx * X / Z + cx;
     double predictedV = fy * Y / Z + cy;
     residual(0) = targetU - predictedU;
@@ -91,8 +104,7 @@ static inline bool ComputeReprojectionResidualAndJacobians(
 // ==================== Ceres 参数块与局部参数化定义 ====================
 
 /**
- * @brief Ceres 自定义参数化更新：针对包含 [平移(3维), 四元数(4维)] 共7维数据的位姿块进行乘法流形更新
- * 对应原手写代码中的 UpdatePose。
+ * @brief Ceres 局部参数化：使用 Sophus 进行标准的右扰动位姿更新
  */
 class PoseLocalParameterization : public ceres::LocalParameterization
 {
@@ -103,31 +115,31 @@ public:
         Eigen::Map<const Eigen::Vector3d> oldTranslation(x);
         Eigen::Map<const Eigen::Quaterniond> oldRotation(x + 3);
 
+        // delta 包含 [平移增量(3维), 旋转李代数(3维)]
         Eigen::Map<const Eigen::Matrix<double, 6, 1>> deltaPose(delta);
 
         Eigen::Map<Eigen::Vector3d> newTranslation(x_plus_delta);
         Eigen::Map<Eigen::Quaterniond> newRotation(x_plus_delta + 3);
 
-        // 保持原 UpdatePose 的李代数左/右乘叠加逻辑
-        newTranslation = oldTranslation + oldRotation.toRotationMatrix() * deltaPose.head<3>();
+        // 构造当前的 Sophus SE(3) 对象
+        Sophus::SE3d T_old(oldRotation, oldTranslation);
+        
+        // 使用 Sophus::SE3d::exp 进行标准的右扰动（Right Multiplicative）更新： T_new = T_old * exp(delta)
+        Sophus::SE3d T_new = T_old * Sophus::SE3d::exp(deltaPose);
 
-        Eigen::Vector3d deltaTheta = deltaPose.tail<3>();
-        Eigen::Quaterniond deltaQ(1.0, deltaTheta.x() / 2.0, deltaTheta.y() / 2.0, deltaTheta.z() / 2.0);
-        deltaQ.normalize();
-
-        newRotation = oldRotation * deltaQ;
-        newRotation.normalize();
+        // 写回内存
+        newTranslation = T_new.translation();
+        newRotation = T_new.unit_quaternion();
         return true;
     }
     virtual bool ComputeJacobian(const double *x, double *jacobian) const
     {
-        // 告诉 Ceres 7维状态对6维切空间增量的雅可比（由于解析残差里已经直接对 6DOF 状态求导，这里填恒等阵即可映射）
         Eigen::Map<Eigen::Matrix<double, 7, 6, Eigen::RowMajor>> J(jacobian);
         J.setIdentity();
         return true;
     }
-    virtual int GlobalSize() const { return 7; } // 3平移 + 4四元数
-    virtual int LocalSize() const { return 6; }  // 6自由度位姿
+    virtual int GlobalSize() const { return 7; } 
+    virtual int LocalSize() const { return 6; }  
 };
 
 // ==================== Ceres 残差块定义 ====================
