@@ -194,10 +194,6 @@ private:
         pose_stamped.pose = odom.pose.pose;
 
         std::lock_guard<std::mutex> lock(path_mutex_);
-        if (mv_path_poses_.size() > 2000)
-        {
-            mv_path_poses_.erase(mv_path_poses_.begin());
-        }
         mv_path_poses_.push_back(pose_stamped);
 
         nav_msgs::msg::Path path_msg;
