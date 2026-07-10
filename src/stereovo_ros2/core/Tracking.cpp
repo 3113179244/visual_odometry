@@ -369,8 +369,8 @@ void Tracking::CullMapPoints()
     auto &mspMapPoints = mpMap->GetMapPoints(); // 注意这里是引用，可直接修改
 
     // ===== 筛选参数 =====
-    const int MIN_OBSERVATIONS = 2;
-    const int MAX_CONSECUTIVE_OUTLIER = 3;
+    const int MIN_OBSERVATIONS = 3;// 最少观测次数，低于此值的地图点将被标记为坏点
+    const int MAX_CONSECUTIVE_OUTLIER = 2;// 连续被判定为外点的最大次数，超过此值的地图点将被标记为坏点
 
     // 每 3 次调用执行一次清理
     mnCullCounter++;
