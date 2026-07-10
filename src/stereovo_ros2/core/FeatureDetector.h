@@ -50,6 +50,8 @@ public:
     std::vector<cv::Point2f> mvPtsVel;
     std::map<int, cv::Point2f> mInversePrevPtsMap;
     cv::Mat mMask;
+    std::vector<cv::Point2f> mvRightPts;
+    std::vector<uchar> stereoStatus;
 
 private:
     int mMaxCnt;

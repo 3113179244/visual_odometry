@@ -195,10 +195,18 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             mmIDToMapPoint, mpMap, true, vWorldPoints, imgTrack);
 
         // 3. 创建第一个关键帧（收集当前帧成功生成 3D 地图点或被观测到的特征）
-        std::map<int, cv::Point2f> initMeasurements;
+        std::map<int, StereoObs> initMeasurements;
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
-            initMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
+            int id = mpFeatureDetector->mvIds[i];
+            StereoObs obs;
+            obs.ptLeft = mpFeatureDetector->mvCurPts[i];
+            if (i < mpFeatureDetector->mvRightPts.size() && mpFeatureDetector->stereoStatus[i])
+            {
+                obs.ptRight = mpFeatureDetector->mvRightPts[i];
+                obs.hasRight = true;
+            }
+            initMeasurements[id] = obs;
         }
 
         // 第一帧 localPose 为单位阵，代表当前相机坐标系即为世界坐标系原点。
@@ -206,7 +214,11 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, initMeasurements);
         mpMap->AddKeyFrame(pKF);
 
-        mvpPrevKFPointsMap = initMeasurements;
+        mvpPrevKFPointsMap.clear();
+        for (const auto &pair : initMeasurements)
+        {
+            mvpPrevKFPointsMap[pair.first] = pair.second.ptLeft;
+        }
         mIsInitialized = true;
 
         // 4. 绘制特征点
@@ -255,16 +267,27 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     if (isKeyFrame)
     {
         // 构建当前帧的观测
-        std::map<int, cv::Point2f> currentMeasurements;
+        std::map<int, StereoObs> currentMeasurements;
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
-            currentMeasurements[mpFeatureDetector->mvIds[i]] = mpFeatureDetector->mvCurPts[i];
+            int id = mpFeatureDetector->mvIds[i];
+            StereoObs obs;
+            obs.ptLeft = mpFeatureDetector->mvCurPts[i];
+            if (i < mpFeatureDetector->mvRightPts.size() && mpFeatureDetector->stereoStatus[i])
+            {
+                obs.ptRight = mpFeatureDetector->mvRightPts[i];
+                obs.hasRight = true;
+            }
+            currentMeasurements[id] = obs;
         }
 
         auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, currentMeasurements);
         mpMap->AddKeyFrame(pKF);
-        mvpPrevKFPointsMap = currentMeasurements;
-
+        mvpPrevKFPointsMap.clear();
+        for (const auto &pair : currentMeasurements)
+        {
+            mvpPrevKFPointsMap[pair.first] = pair.second.ptLeft;
+        }
         // 通知后端线程进行局部BA
         {
             std::unique_lock<std::mutex> lock(mMutexBackend);
@@ -369,8 +392,8 @@ void Tracking::CullMapPoints()
     auto &mspMapPoints = mpMap->GetMapPoints(); // 注意这里是引用，可直接修改
 
     // ===== 筛选参数 =====
-    const int MIN_OBSERVATIONS = 3;// 最少观测次数，低于此值的地图点将被标记为坏点
-    const int MAX_CONSECUTIVE_OUTLIER = 2;// 连续被判定为外点的最大次数，超过此值的地图点将被标记为坏点
+    const int MIN_OBSERVATIONS = 3;        // 最少观测次数，低于此值的地图点将被标记为坏点
+    const int MAX_CONSECUTIVE_OUTLIER = 2; // 连续被判定为外点的最大次数，超过此值的地图点将被标记为坏点
 
     // 每 3 次调用执行一次清理
     mnCullCounter++;
