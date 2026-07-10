@@ -1,15 +1,15 @@
-evo_ape kitti 05.txt trajectory.txt -va --plot --plot_mode xyz 
+evo_ape kitti 05.txt trajectory.txt -va --plot --plot_mode xz 
 --------------------------------------------------------------------------------
 Loaded 2761 poses from: 05.txt
 Loaded 2761 poses from: trajectory.txt
 --------------------------------------------------------------------------------
 Aligning using Umeyama's method...
 Rotation of alignment:
-[[ 0.99988085 -0.01394306  0.00662341]
- [ 0.01384098  0.99978844  0.01521553]
- [-0.00683416 -0.01512204  0.9998623 ]]
+[[ 9.99815439e-01  2.19693182e-04  1.92104170e-02]
+ [-3.50123058e-04  9.99976911e-01  6.78643931e-03]
+ [-1.92084825e-02 -6.79191280e-03  9.99792431e-01]]
 Translation of alignment:
-[-1.32212646 -4.11812313 -1.28259846]
+[-1.88512318 -0.01115699 -0.41341826]
 Scale correction: 1.0
 --------------------------------------------------------------------------------
 Compared 2761 absolute pose pairs.
@@ -18,62 +18,29 @@ Calculating APE for translation part pose relation...
 APE w.r.t. translation part (m)
 (with SE(3) Umeyama alignment)
 
-       max	4.511321
-      mean	2.615032
-    median	2.688763
-       min	1.154218
-      rmse	2.732802
-       sse	20619.722600
-       std	0.793611
+       max	5.522328
+      mean	2.379925
+    median	2.252738
+       min	1.031616
+      rmse	2.547237
+       sse	17914.521478
+       std	0.907950
 
 --------------------------------------------------------------------------------
 Plotting results... 
 
-evo_rpe kitti 05.txt trajectory.txt -va --plot --plot_mode xyz 
---------------------------------------------------------------------------------
-Loaded 2761 poses from: 05.txt
-Loaded 2761 poses from: trajectory.txt
---------------------------------------------------------------------------------
-Aligning using Umeyama's method...
-Rotation of alignment:
-[[ 0.99988085 -0.01394306  0.00662341]
- [ 0.01384098  0.99978844  0.01521553]
- [-0.00683416 -0.01512204  0.9998623 ]]
-Translation of alignment:
-[-1.32212646 -4.11812313 -1.28259846]
-Scale correction: 1.0
---------------------------------------------------------------------------------
-Found 2760 pairs with delta 1 (frames) among 2761 poses using consecutive pairs.
-Compared 2760 relative pose pairs, delta = 1 (frames) with consecutive pairs.
-Calculating RPE for translation part pose relation...
---------------------------------------------------------------------------------
-RPE w.r.t. translation part (m)
-for delta = 1 (frames) using consecutive pairs
-(with SE(3) Umeyama alignment)
-
-       max	0.578333
-      mean	0.019049
-    median	0.014317
-       min	0.000458
-      rmse	0.027990
-       sse	2.162276
-       std	0.020508
-
---------------------------------------------------------------------------------
-Plotting results... 
-
-evo_ape kitti 07.txt trajectory.txt -va --plot --plot_mode xyz 
+evo_ape kitti 07.txt trajectory.txt -va --plot --plot_mode xz 
 --------------------------------------------------------------------------------
 Loaded 1101 poses from: 07.txt
 Loaded 1101 poses from: trajectory.txt
 --------------------------------------------------------------------------------
 Aligning using Umeyama's method...
 Rotation of alignment:
-[[ 9.99922885e-01 -9.50998420e-04  1.23822534e-02]
- [ 9.99728528e-04  9.99991778e-01 -3.92988500e-03]
- [-1.23784142e-02  3.94196083e-03  9.99915614e-01]]
+[[ 9.99563754e-01  9.93826005e-03  2.78124425e-02]
+ [-9.91329123e-03  9.99950326e-01 -1.03549961e-03]
+ [-2.78213520e-02  7.59335032e-04  9.99612623e-01]]
 Translation of alignment:
-[ 1.22596583 -0.19785445 -1.77335775]
+[-2.53907912 -0.89684807 -2.99675453]
 Scale correction: 1.0
 --------------------------------------------------------------------------------
 Compared 1101 absolute pose pairs.
@@ -82,62 +49,29 @@ Calculating APE for translation part pose relation...
 APE w.r.t. translation part (m)
 (with SE(3) Umeyama alignment)
 
-       max	2.497478
-      mean	0.981290
-    median	0.848789
-       min	0.086114
-      rmse	1.145281
-       sse	1444.147264
-       std	0.590541
+       max	4.028870
+      mean	1.524130
+    median	1.186002
+       min	0.236265
+      rmse	1.816679
+       sse	3633.655555
+       std	0.988611
 
 --------------------------------------------------------------------------------
 Plotting results... 
 
-evo_rpe kitti 07.txt trajectory.txt -va --plot --plot_mode xyz 
---------------------------------------------------------------------------------
-Loaded 1101 poses from: 07.txt
-Loaded 1101 poses from: trajectory.txt
---------------------------------------------------------------------------------
-Aligning using Umeyama's method...
-Rotation of alignment:
-[[ 9.99922885e-01 -9.50998420e-04  1.23822534e-02]
- [ 9.99728528e-04  9.99991778e-01 -3.92988500e-03]
- [-1.23784142e-02  3.94196083e-03  9.99915614e-01]]
-Translation of alignment:
-[ 1.22596583 -0.19785445 -1.77335775]
-Scale correction: 1.0
---------------------------------------------------------------------------------
-Found 1100 pairs with delta 1 (frames) among 1101 poses using consecutive pairs.
-Compared 1100 relative pose pairs, delta = 1 (frames) with consecutive pairs.
-Calculating RPE for translation part pose relation...
---------------------------------------------------------------------------------
-RPE w.r.t. translation part (m)
-for delta = 1 (frames) using consecutive pairs
-(with SE(3) Umeyama alignment)
-
-       max	0.589531
-      mean	0.017590
-    median	0.011333
-       min	0.000198
-      rmse	0.037407
-       sse	1.539245
-       std	0.033014
-
---------------------------------------------------------------------------------
-Plotting results... 
-
-evo_ape kitti 08.txt trajectory.txt -va --plot --plot_mode xyz 
+evo_ape kitti 08.txt trajectory.txt -va --plot --plot_mode xz
 --------------------------------------------------------------------------------
 Loaded 4071 poses from: 08.txt
 Loaded 4071 poses from: trajectory.txt
 --------------------------------------------------------------------------------
 Aligning using Umeyama's method...
 Rotation of alignment:
-[[ 0.9997276  -0.01139693 -0.02036758]
- [ 0.01148787  0.99992453  0.0043536 ]
- [ 0.02031643 -0.00458639  0.99978308]]
+[[ 0.99706532  0.07240387 -0.0248681 ]
+ [-0.0740806   0.99443711 -0.07487924]
+ [ 0.01930822  0.07650174  0.99688248]]
 Translation of alignment:
-[ 1.86191491 -3.13624683 -7.05570285]
+[-0.54421041 -4.12857659 -5.3549813 ]
 Scale correction: 1.0
 --------------------------------------------------------------------------------
 Compared 4071 absolute pose pairs.
@@ -146,47 +80,44 @@ Calculating APE for translation part pose relation...
 APE w.r.t. translation part (m)
 (with SE(3) Umeyama alignment)
 
-       max	14.162915
-      mean	4.291656
-    median	3.309293
-       min	0.463788
-      rmse	5.037090
-       sse	103290.537389
-       std	2.637036
+       max	12.329400
+      mean	4.823513
+    median	4.211236
+       min	1.605107
+      rmse	5.325994
+       sse	115478.837530
+       std	2.258303
 
 --------------------------------------------------------------------------------
 Plotting results... 
 
-evo_rpe kitti 08.txt trajectory.txt -va --plot --plot_mode xyz 
+evo_ape kitti 09.txt trajectory.txt -va --plot --plot_mode xz 
 --------------------------------------------------------------------------------
-Loaded 4071 poses from: 08.txt
-Loaded 4071 poses from: trajectory.txt
+Loaded 1591 poses from: 09.txt
+Loaded 1591 poses from: trajectory.txt
 --------------------------------------------------------------------------------
 Aligning using Umeyama's method...
 Rotation of alignment:
-[[ 0.9997276  -0.01139693 -0.02036758]
- [ 0.01148787  0.99992453  0.0043536 ]
- [ 0.02031643 -0.00458639  0.99978308]]
+[[ 0.99910066 -0.042231    0.00379622]
+ [ 0.04234019  0.998459   -0.03587374]
+ [-0.00227538  0.03600221  0.99934912]]
 Translation of alignment:
-[ 1.86191491 -3.13624683 -7.05570285]
+[-8.65054026 11.62534979 -7.65681968]
 Scale correction: 1.0
 --------------------------------------------------------------------------------
-Found 4070 pairs with delta 1 (frames) among 4071 poses using consecutive pairs.
-Compared 4070 relative pose pairs, delta = 1 (frames) with consecutive pairs.
-Calculating RPE for translation part pose relation...
+Compared 1591 absolute pose pairs.
+Calculating APE for translation part pose relation...
 --------------------------------------------------------------------------------
-RPE w.r.t. translation part (m)
-for delta = 1 (frames) using consecutive pairs
+APE w.r.t. translation part (m)
 (with SE(3) Umeyama alignment)
 
-       max	0.921275
-      mean	0.028061
-    median	0.018525
-       min	0.000772
-      rmse	0.048025
-       sse	9.387207
-       std	0.038975
+       max	16.389249
+      mean	5.990807
+    median	4.399291
+       min	1.931891
+      rmse	7.084502
+       sse	79852.548114
+       std	3.781585
 
 --------------------------------------------------------------------------------
 Plotting results... 
-
