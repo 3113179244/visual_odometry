@@ -5,7 +5,7 @@
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <ceres/ceres.h> 
+#include <ceres/ceres.h>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -17,7 +17,7 @@
 
 /**
  * @brief 计算双目重投影残差及其对位姿和逆深度的雅可比矩阵 (基于 Sophus 右扰动模型规范化)
- * 
+ *
  * @param hostTranslation    参考帧(Host)在世界坐标系下的平移向量 $t_{w,host}$
  * @param hostRotation       参考帧(Host)在世界坐标系下的旋转四元数 $q_{w,host}$
  * @param targetTranslation  当前帧(Target)在世界坐标系下的平移向量 $t_{w,target}$
@@ -32,12 +32,12 @@
  * @param hasRight           当前 Target 帧是否成功追踪到了该点的右目观测
  * @param fx, fy, cx, cy     相机内参
  * @param T_c1_c0            左目相机到右目相机的相对外参 (即双目基线变换 $T_{right, left}$)
- * 
+ *
  * @output residual          4维残差向量 $[r_{uL}, r_{vL}, r_{uR}, r_{vR}]^T$
  * @output jacobianHost      残差对 Host 位姿的雅可比矩阵 ($4 \times 6$)
  * @output jacobianTarget    残差对 Target 位姿的雅可比矩阵 ($4 \times 6$)
  * @output jacobianInvDepth  残差对地图点在 Host 帧下逆深度的雅可比矩阵 ($4 \times 1$)
- * 
+ *
  * @return 是否计算成功（若点投影到 Target 帧后深度不合法，返回 false）
  */
 static inline bool ComputeStereoReprojectionResidualAndJacobians(
@@ -48,7 +48,7 @@ static inline bool ComputeStereoReprojectionResidualAndJacobians(
     double targetLeftU, double targetLeftV,
     double targetRightU, double targetRightV, bool hasRight,
     double fx, double fy, double cx, double cy,
-    const Sophus::SE3d &T_c1_c0, 
+    const Sophus::SE3d &T_c1_c0,
     Eigen::Matrix<double, 4, 1> &residual,
     Eigen::Matrix<double, 4, 6> &jacobianHost,
     Eigen::Matrix<double, 4, 6> &jacobianTarget,
@@ -63,7 +63,7 @@ static inline bool ComputeStereoReprojectionResidualAndJacobians(
     // 构造李群形式的位姿变换矩阵 T_w_host 和 T_w_target
     Sophus::SE3d T_w_host(hostRotation, hostTranslation);
     Sophus::SE3d T_w_target(targetRotation, targetTranslation);
-    
+
     // 计算从 Host 帧到 Target 帧的相对位姿变换： $T_{target, host} = T_{w,target}^{-1} \cdot T_{w,host}$
     Sophus::SE3d T_target_host = T_w_target.inverse() * T_w_host;
 
@@ -76,8 +76,9 @@ static inline bool ComputeStereoReprojectionResidualAndJacobians(
     // -------------------------------------------------------------------------
     Eigen::Vector3d pointTarget_c0 = T_target_host * pointHost;
     double X0 = pointTarget_c0.x(), Y0 = pointTarget_c0.y(), Z0 = pointTarget_c0.z();
-    
-    if (Z0 < 1e-4) return false; // 严格的非正正定深度校验，防止数值爆炸
+
+    if (Z0 < 1e-4)
+        return false; // 严格的非正正定深度校验，防止数值爆炸
 
     double invZ0 = 1.0 / Z0;
     double invZ0_2 = invZ0 * invZ0;
@@ -85,20 +86,20 @@ static inline bool ComputeStereoReprojectionResidualAndJacobians(
     // 计算像素坐标对相机系 3D 点的投影导数 (链式法则第一步) $\frac{\partial e}{\partial P_{target}}$
     Eigen::Matrix<double, 2, 3> jacProj0;
     jacProj0 << fx * invZ0, 0.0, -fx * X0 * invZ0_2,
-                0.0, fy * invZ0, -fy * Y0 * invZ0_2;
+        0.0, fy * invZ0, -fy * Y0 * invZ0_2;
 
     // 计算 Target 帧相机系 3D 点对 Target 位姿（李代数 $\delta \xi_{target}$）的右扰动导数
     Eigen::Matrix<double, 3, 6> dPt0_dXiTarget, dPt0_dXiHost;
     dPt0_dXiTarget.block<3, 3>(0, 0) = -Eigen::Matrix3d::Identity();
     dPt0_dXiTarget.block<3, 3>(0, 3) = Sophus::SO3d::hat(pointTarget_c0); // 反对称矩阵
-    
+
     // 最终残差对 Target 位姿的雅可比 (注意带负号，因为残差 = 观测 - 预测)
     jacobianTarget.block<2, 6>(0, 0) = -jacProj0 * dPt0_dXiTarget;
 
     // 计算 Target 帧相机系 3D 点对 Host 位姿（李代数 $\delta \xi_{host}$）的右扰动导数
     dPt0_dXiHost.block<3, 3>(0, 0) = T_target_host.rotationMatrix();
     dPt0_dXiHost.block<3, 3>(0, 3) = -T_target_host.rotationMatrix() * Sophus::SO3d::hat(pointHost);
-    
+
     // 最终残差对 Host 位姿的雅可比
     jacobianHost.block<2, 6>(0, 0) = -jacProj0 * dPt0_dXiHost;
 
@@ -118,7 +119,7 @@ static inline bool ComputeStereoReprojectionResidualAndJacobians(
         // 将 Target 左目系下的点变换到 Target 右目系下：$P_{target\_c1} = T_{c1\_c0} \cdot P_{target\_c0}$
         Eigen::Vector3d pointTarget_c1 = T_c1_c0 * pointTarget_c0;
         double X1 = pointTarget_c1.x(), Y1 = pointTarget_c1.y(), Z1 = pointTarget_c1.z();
-        
+
         if (Z1 > 1e-4)
         {
             double invZ1 = 1.0 / Z1;
@@ -127,10 +128,10 @@ static inline bool ComputeStereoReprojectionResidualAndJacobians(
             // 右目投影矩阵导数
             Eigen::Matrix<double, 2, 3> jacProj1;
             jacProj1 << fx * invZ1, 0.0, -fx * X1 * invZ1_2,
-                        0.0, fy * invZ1, -fy * Y1 * invZ1_2;
+                0.0, fy * invZ1, -fy * Y1 * invZ1_2;
 
             Eigen::Matrix3d R_c1_c0 = T_c1_c0.rotationMatrix();
-            
+
             // 利用链式法则，乘以旋转矩阵 $R_{c1\_c0}$ 将导数传递回去
             jacobianTarget.block<2, 6>(2, 0) = -jacProj1 * R_c1_c0 * dPt0_dXiTarget;
             jacobianHost.block<2, 6>(2, 0) = -jacProj1 * R_c1_c0 * dPt0_dXiHost;
@@ -149,7 +150,7 @@ static inline bool ComputeStereoReprojectionResidualAndJacobians(
 
 /**
  * @brief 自定义 Ceres 局部参数化类，处理位姿在流形 (Manifold) 上的加法
- * 
+ *
  * 传统的位姿参数块采用 7 维向量存储（3维平移 + 4维四元数旋转）。
  * 四元数具有过参数化特征（必须保持单位长度），直接进行常规加法会破坏流形约束。
  * 这里采用李群 SE(3) 的指数映射将 6 维切空间(李代数)的微增量更新到 7 维流形上位姿。
@@ -158,7 +159,7 @@ class PoseLocalParameterization : public ceres::LocalParameterization
 {
 public:
     virtual ~PoseLocalParameterization() {}
-    
+
     /**
      * @brief 流形上的加法算子： $T_{new} = T_{old} \cdot \exp(\delta \xi)$
      */
@@ -179,7 +180,7 @@ public:
         newRotation = T_new.unit_quaternion();
         return true;
     }
-    
+
     /**
      * @brief 计算全局参数对局部切空间的雅可比，由于我们在 Compute 内部已经完成了扰动推导，这里直接给单位阵。
      */
@@ -189,7 +190,7 @@ public:
         J.setIdentity();
         return true;
     }
-    
+
     virtual int GlobalSize() const { return 7; } // 内存存储大小 (x,y,z, qx,qy,qz,qw)
     virtual int LocalSize() const { return 6; }  // 实际自由度大小 (重构平移自由度3 + 旋转自由度3)
 };
@@ -198,18 +199,18 @@ public:
 
 /**
  * @brief 双目重投影残差代价函数
- * 
+ *
  * 继承自形式最灵活的基类 `ceres::CostFunction`，方便我们自己手动编写高效的解析雅可比。
  */
 class StereoReprojectionCostFunction : public ceres::CostFunction
 {
 public:
-    StereoReprojectionCostFunction(double hostUn, double hostVn, 
+    StereoReprojectionCostFunction(double hostUn, double hostVn,
                                    double targetLeftU, double targetLeftV,
                                    double targetRightU, double targetRightV, bool hasRight,
                                    double fx, double fy, double cx, double cy,
                                    const Sophus::SE3d &T_c1_c0)
-        : hostUn_(hostUn), hostVn_(hostVn), 
+        : hostUn_(hostUn), hostVn_(hostVn),
           tLU_(targetLeftU), tLV_(targetLeftV), tRU_(targetRightU), tRV_(targetRightV),
           hasRight_(hasRight), fx_(fx), fy_(fy), cx_(cx), cy_(cy), T_c1_c0_(T_c1_c0)
     {
@@ -217,7 +218,7 @@ public:
         mutable_parameter_block_sizes()->push_back(7); // 参数块0: Host 关键帧位姿 (7维)
         mutable_parameter_block_sizes()->push_back(7); // 参数块1: Target 关键帧位姿 (7维)
         mutable_parameter_block_sizes()->push_back(1); // 参数块2: 该地图点的 Host 逆深度 (1维)
-        set_num_residuals(4); // 4维残差向量 $[u_L, v_L, u_R, v_R]^T$
+        set_num_residuals(4);                          // 4维残差向量 $[u_L, v_L, u_R, v_R]^T$
     }
 
     /**
@@ -243,13 +244,16 @@ public:
             tLU_, tLV_, tRU_, tRV_, hasRight_, fx_, fy_, cx_, cy_, T_c1_c0_,
             res, J_host, J_target, J_invDepth);
 
-        if (!valid) return false;
+        if (!valid)
+            return false;
 
         // 3. 填充残差向量
-        for(int i = 0; i < 4; ++i) residuals[i] = res(i);
+        for (int i = 0; i < 4; ++i)
+            residuals[i] = res(i);
 
         // 如果没有有效的右目追踪，将后两维（右目）的残差硬性清零，避免干扰优化
-        if (!hasRight_) {
+        if (!hasRight_)
+        {
             residuals[2] = 0.0;
             residuals[3] = 0.0;
         }
@@ -258,24 +262,30 @@ public:
         if (jacobians)
         {
             // 对 Host 位姿的导数块 ($4 \times 7$)
-            if (jacobians[0]) {
+            if (jacobians[0])
+            {
                 Eigen::Map<Eigen::Matrix<double, 4, 7, Eigen::RowMajor>> J0(jacobians[0]);
                 J0.setZero();
                 J0.block<4, 6>(0, 0) = J_host; // 仅填充前 6 列局部自由度切空间导数
-                if(!hasRight_) J0.block<2, 6>(2, 0).setZero();
+                if (!hasRight_)
+                    J0.block<2, 6>(2, 0).setZero();
             }
             // 对 Target 位姿的导数块 ($4 \times 7$)
-            if (jacobians[1]) {
+            if (jacobians[1])
+            {
                 Eigen::Map<Eigen::Matrix<double, 4, 7, Eigen::RowMajor>> J1(jacobians[1]);
                 J1.setZero();
                 J1.block<4, 6>(0, 0) = J_target;
-                if(!hasRight_) J1.block<2, 6>(2, 0).setZero();
+                if (!hasRight_)
+                    J1.block<2, 6>(2, 0).setZero();
             }
             // 对地图点逆深度的导数块 ($4 \times 1$)
-            if (jacobians[2]) {
+            if (jacobians[2])
+            {
                 Eigen::Map<Eigen::Matrix<double, 4, 1>> J2(jacobians[2]);
                 J2 = J_invDepth;
-                if(!hasRight_) J2.block<2, 1>(2, 0).setZero();
+                if (!hasRight_)
+                    J2.block<2, 1>(2, 0).setZero();
             }
         }
         return true;
@@ -296,11 +306,13 @@ private:
  */
 void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 {
-    if (!map) return;
+    if (!map)
+        return;
 
     // 获取地图内全部关键帧
     std::vector<std::shared_ptr<KeyFrame>> allKeyFrames = map->GetAllKeyFrames();
-    if (allKeyFrames.size() < 2) return; // 至少需要两帧才能进行相对位姿与结构交叉优化
+    if (allKeyFrames.size() < 2)
+        return; // 至少需要两帧才能进行相对位姿与结构交叉优化
 
     // -------------------------------------------------------------------------
     // 1. 提取并建立滑动窗口内的活跃关键帧 (Active KeyFrames) 集合
@@ -323,20 +335,27 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         Eigen::Quaterniond q(Twc.rotation());
 
         // 格式转换为连续内存阵列：[x, y, z, qx, qy, qz, qw]
-        poseBlocks[i][0] = t.x(); poseBlocks[i][1] = t.y(); poseBlocks[i][2] = t.z();
-        poseBlocks[i][3] = q.x(); poseBlocks[i][4] = q.y(); poseBlocks[i][5] = q.z(); poseBlocks[i][6] = q.w();
+        poseBlocks[i][0] = t.x();
+        poseBlocks[i][1] = t.y();
+        poseBlocks[i][2] = t.z();
+        poseBlocks[i][3] = q.x();
+        poseBlocks[i][4] = q.y();
+        poseBlocks[i][5] = q.z();
+        poseBlocks[i][6] = q.w();
 
         // 记录全局关键帧 ID 到滑动窗口内部局部索引的映射关系
         keyFrameIdToIdx[activeKeyFrames[i]->mId] = i;
     }
 
     // 提取全局基础相机内参
-    double camFx = Parameters::fx; double camFy = Parameters::fy;
-    double camCx = Parameters::cx; double camCy = Parameters::cy;
+    double camFx = Parameters::fx;
+    double camFy = Parameters::fy;
+    double camCx = Parameters::cx;
+    double camCy = Parameters::cy;
 
     // 依靠解析好的车体/外参矩阵计算相对双目相机外参：$T_{c1,c0} = T_{body,c1}^{-1} \cdot T_{body,c0}$
-    Sophus::SE3d T_b_c0(Eigen::Quaterniond(Parameters::body_T_cam0.block<3,3>(0,0)), Parameters::body_T_cam0.block<3,1>(0,3));
-    Sophus::SE3d T_b_c1(Eigen::Quaterniond(Parameters::body_T_cam1.block<3,3>(0,0)), Parameters::body_T_cam1.block<3,1>(0,3));
+    Sophus::SE3d T_b_c0(Eigen::Quaterniond(Parameters::body_T_cam0.block<3, 3>(0, 0)), Parameters::body_T_cam0.block<3, 1>(0, 3));
+    Sophus::SE3d T_b_c1(Eigen::Quaterniond(Parameters::body_T_cam1.block<3, 3>(0, 0)), Parameters::body_T_cam1.block<3, 1>(0, 3));
     Sophus::SE3d T_c1_c0 = T_b_c1.inverse() * T_b_c0;
 
     // -------------------------------------------------------------------------
@@ -348,8 +367,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         mapIdToMapPoint[mp->GetFeatureId()] = mp;
 
     std::unordered_map<int, int> mapPointIdToIdx;
-    std::vector<double> invDepthVector;       // 存储优化的地图点逆深度参数块一维连续数组
-    std::vector<int> mapPointHostFrameIdx;    // 记录每个地图点在滑窗内的哪个关键帧被确立为 Host 帧
+    std::vector<double> invDepthVector;                    // 存储优化的地图点逆深度参数块一维连续数组
+    std::vector<int> mapPointHostFrameIdx;                 // 记录每个地图点在滑窗内的哪个关键帧被确立为 Host 帧
     std::vector<std::shared_ptr<MapPoint>> mapPointRefVec; // 关联原始地图点的指针以便后续写回结果
 
     for (int i = 0; i < numKeyFrames; ++i)
@@ -359,7 +378,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         {
             int mapPointId = obs.first;
             auto itMp = mapIdToMapPoint.find(mapPointId);
-            if (itMp == mapIdToMapPoint.end()) continue;
+            if (itMp == mapIdToMapPoint.end())
+                continue;
 
             // 如果该地图点未曾在优化队列中被初始化，则将其加入逆深度优化阵列
             if (mapPointIdToIdx.find(mapPointId) == mapPointIdToIdx.end())
@@ -387,7 +407,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
     // 3a. 将关键帧位姿参数块加入优化问题，并绑定自定义的流形旋转更新算子
     for (int i = 0; i < numKeyFrames; ++i)
         problem.AddParameterBlock(poseBlocks[i].data(), 7, poseParameterization);
-        
+
     // 关键核心：将当前滑动窗口内最早的第一帧关键帧固定 (Set Constant)
     // 作用是约束 SLAM 的标度与 7 自由度规范场不发生整体漂移（即规范场零点固定值：固定第一帧位姿）
     problem.SetParameterBlockConstant(poseBlocks[0].data());
@@ -402,13 +422,15 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
             StereoObs obsTarget = obs.second;
 
             auto itMpIdx = mapPointIdToIdx.find(mapPointId);
-            if (itMpIdx == mapPointIdToIdx.end()) continue;
+            if (itMpIdx == mapPointIdToIdx.end())
+                continue;
 
             int mpIdx = itMpIdx->second;
             int hostIdx = mapPointHostFrameIdx[mpIdx];
-            
+
             // 跳过自共视观测（即自己对自己的观测），只优化不同帧之间的跨帧重投影残差
-            if (hostIdx == targetIdx) continue;
+            if (hostIdx == targetIdx)
+                continue;
 
             // 获取 Host 帧的左目观测数据
             StereoObs obsHost = activeKeyFrames[hostIdx]->mmObservations[mapPointId];
@@ -422,8 +444,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
 
             // 构造重投影残差实例
             ceres::CostFunction *costFunction = new StereoReprojectionCostFunction(
-                hostUn, hostVn, 
-                obsTarget.ptLeft.x, obsTarget.ptLeft.y, 
+                hostUn, hostVn,
+                obsTarget.ptLeft.x, obsTarget.ptLeft.y,
                 obsTarget.ptRight.x, obsTarget.ptRight.y, obsTarget.hasRight,
                 camFx, camFy, camCx, camCy, T_c1_c0);
 
@@ -437,8 +459,8 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                                      &invDepthVector[mpIdx]);
 
             // 设置逆深度的物理意义边界，限制地图点在合理的深度可视范围内
-            problem.SetParameterLowerBound(&invDepthVector[mpIdx], 0, 0.001); // 对应最大深度 1000m
-            problem.SetParameterUpperBound(&invDepthVector[mpIdx], 0, 10.0);  // 对应最小深度 0.1m
+            problem.SetParameterLowerBound(&invDepthVector[mpIdx], 0, 1.0 / 300.0); // 对应最大深度 300m
+            problem.SetParameterUpperBound(&invDepthVector[mpIdx], 0, 1.0 / 0.5);   // 对应最小深度 0.5m
         }
     }
 
@@ -450,7 +472,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
     // 利用了 SLAM 图优化的稀疏二分图特性（先消去点参数块，优先求解位姿增量，实现极快速的局部 BA）
     options.linear_solver_type = ceres::DENSE_SCHUR;
     options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT; // 使用经典的 LM 阻尼方法
-    options.max_num_iterations = 15; // 限制最大迭代次数，保证后端线程能快速实时响应
+    options.max_num_iterations = 15;                                 // 限制最大迭代次数，保证后端线程能快速实时响应
     options.function_tolerance = 1e-4;
     options.parameter_tolerance = 1e-4;
     options.minimizer_progress_to_stdout = false; // 关闭标准输出，保持终端整洁
@@ -461,14 +483,14 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
     // -------------------------------------------------------------------------
     // 5. 优化完成，将收敛后的最优值写回原 SLAM 核心数据结构
     // -------------------------------------------------------------------------
-    
+
     // 5a. 更新关键帧位姿
     for (int i = 0; i < numKeyFrames; ++i)
     {
         Eigen::Vector3d t(poseBlocks[i][0], poseBlocks[i][1], poseBlocks[i][2]);
-        Eigen::Quaterniond q(poseBlocks[i][6], poseBlocks[i][3], poseBlocks[i][4], poseBlocks[i][5]); 
+        Eigen::Quaterniond q(poseBlocks[i][6], poseBlocks[i][3], poseBlocks[i][4], poseBlocks[i][5]);
         q.normalize(); // 必须重新归一化，消除累积数值舍入误差
-        
+
         Eigen::Isometry3d TwcOpt = Eigen::Isometry3d::Identity();
         TwcOpt.linear() = q.toRotationMatrix();
         TwcOpt.translation() = t;
@@ -488,12 +510,12 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         double hostVn = (obsHost.ptLeft.y - camCy) / camFy;
 
         Eigen::Vector3d hostRayScaled(hostUn, hostVn, 1.0);
-        
+
         // 获得优化后的 Host 帧最新真实位姿
         Eigen::Vector3d tHost(poseBlocks[hostIdx][0], poseBlocks[hostIdx][1], poseBlocks[hostIdx][2]);
         Eigen::Quaterniond qHost(poseBlocks[hostIdx][6], poseBlocks[hostIdx][3], poseBlocks[hostIdx][4], poseBlocks[hostIdx][5]);
-        qHost.normalize(); 
-        
+        qHost.normalize();
+
         // 计算公式： $P_{world} = R_{w,host} \cdot (P_{host} / \lambda) + t_{w,host}$
         Eigen::Vector3d posWorldOpt = qHost * (hostRayScaled / lambdaOpt) + tHost;
         mapPointRefVec[j]->SetWorldPos(posWorldOpt); // 写入最优 3D 坐标
