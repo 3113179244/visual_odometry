@@ -459,7 +459,7 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
                                      &invDepthVector[mpIdx]);
 
             // 设置逆深度的物理意义边界，限制地图点在合理的深度可视范围内
-            problem.SetParameterLowerBound(&invDepthVector[mpIdx], 0, 1.0 / 300.0); // 对应最大深度 300m
+            problem.SetParameterLowerBound(&invDepthVector[mpIdx], 0, 1.0 / 60.0); // 对应最大深度 300m
             problem.SetParameterUpperBound(&invDepthVector[mpIdx], 0, 1.0 / 0.5);   // 对应最小深度 0.5m
         }
     }
