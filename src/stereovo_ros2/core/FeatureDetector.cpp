@@ -351,94 +351,104 @@ void FeatureDetector::SetMask(int rows, int cols)
 
 void FeatureDetector::AddNewFeatures(const cv::Mat &img)
 {
+    // 检查当前特征点数量是否已经达到或超过最大上限，若是则无需补充
     if ((int)mvCurPts.size() >= mMaxCnt)
         return;
 
-    if (mMask.empty() || mMask.rows != img.rows || mMask.cols != img.cols)
-        mMask = cv::Mat(img.rows, img.cols, CV_8UC1, cv::Scalar(255));
+    // 初始化一张全新的全白掩膜（Mask），255 表示可以提取特征点
+    mMask = cv::Mat(img.rows, img.cols, CV_8UC1, cv::Scalar(255));
 
-    int width = img.cols;
-    int height = img.rows;
-    const int GRID_WIDTH_TARGET = 150;
-    const int GRID_HEIGHT_TARGET = 150;
-    int GRID_COLS = std::max(2, width / GRID_WIDTH_TARGET);
-    int GRID_ROWS = std::max(2, height / GRID_HEIGHT_TARGET);
-    int grid_width = width / GRID_COLS;
-    int grid_height = height / GRID_ROWS;
-    int total_grids = GRID_ROWS * GRID_COLS;
-    int max_per_grid = (mMaxCnt + total_grids - 1) / total_grids;
-    if (max_per_grid < 1)
-        max_per_grid = 1;
-
-    std::vector<std::vector<int>> grid_counts(GRID_ROWS, std::vector<int>(GRID_COLS, 0));
-    for (const auto &pt : mvCurPts)
+    // 建立一个临时结构，将当前特征点、对应的 ID 和跟踪次数捆绑在一起
+    // 结构：std::pair< 跟踪次数, std::pair<特征点坐标, 点ID> >
+    std::vector<std::pair<int, std::pair<cv::Point2f, int>>> vSortPts;
+    vSortPts.reserve(mvCurPts.size());
+    for (size_t i = 0; i < mvCurPts.size(); ++i)
     {
-        int c = static_cast<int>(pt.x / grid_width);
-        int r = static_cast<int>(pt.y / grid_height);
-        if (c >= GRID_COLS)
-            c = GRID_COLS - 1;
-        if (r >= GRID_ROWS)
-            r = GRID_ROWS - 1;
-        if (c >= 0 && r >= 0)
-            grid_counts[r][c]++;
+        vSortPts.push_back(std::make_pair(mvTrackCnt[i], std::make_pair(mvCurPts[i], mvIds[i])));
     }
 
-    for (int r = 0; r < GRID_ROWS; ++r)
+    // 完美的“保老点”核心步骤：按照跟踪次数（mvTrackCnt）从大到小进行降序排列
+    // 资历越老、跟踪越久的点排在越前面，享有绝对的“优先占位权”
+    std::sort(vSortPts.begin(), vSortPts.end(), [](const auto &a, const auto &b) {
+        return a.first > b.first; 
+    });
+
+    // 清空旧的特征点容器，准备用来存放重新筛选后的稳定特征点
+    mvCurPts.clear();
+    mvIds.clear();
+    mvTrackCnt.clear();
+
+    // 遍历排好序的特征点，在 Mask 上圈地，并剔除离得太近的较新点
+    for (const auto &it : vSortPts)
     {
-        for (int c = 0; c < GRID_COLS; ++c)
+        cv::Point2f pt = it.second.first;
+        int ix = cvRound(pt.x);
+        int iy = cvRound(pt.y);
+
+        // 边界安全检查
+        if (ix >= 0 && ix < mMask.cols && iy >= 0 && iy < mMask.rows)
         {
-            int global_needed = mMaxCnt - (int)mvCurPts.size();
-            if (global_needed <= 0)
-                return;
-
-            int needed = max_per_grid - grid_counts[r][c];
-            needed = std::min(needed, global_needed);
-            if (needed <= 0)
-                continue;
-
-            int x = c * grid_width;
-            int y = r * grid_height;
-            int w = (c == GRID_COLS - 1) ? (width - x) : grid_width;
-            int h = (r == GRID_ROWS - 1) ? (height - y) : grid_height;
-            cv::Rect roi(x, y, w, h);
-            cv::Mat sub_img = img(roi);
-            cv::Mat sub_mask = mMask(roi);
-
-            std::vector<cv::Point2f> nPts;
-            cv::goodFeaturesToTrack(sub_img, nPts, needed, 0.01, mMinDist, sub_mask);
-            if (!nPts.empty())
+            // 检查该位置在当前掩膜中是否仍为有效区域（255）
+            // 如果已经被前面更老、更稳定的点“画圈画成 0 了”，说明靠得太近，该点被无情剔除
+            if (mMask.at<uchar>(iy, ix) == 255)
             {
-                cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER + cv::TermCriteria::EPS, 30, 0.01);
-                cv::cornerSubPix(sub_img, nPts, cv::Size(5, 5), cv::Size(-1, -1), criteria);
-                for (const auto &pt : nPts)
+                // 保留这个高资历老点
+                mvCurPts.push_back(pt);
+                mvIds.push_back(it.second.second);
+                mvTrackCnt.push_back(it.first);
+
+                // 立刻以该点为中心，在全局掩膜上画一个半径为 mMinDist 的黑色实心圆（设为 0）
+                // 强制将周围一圈划为自己的“私人领地”，防止后面的人以及新提取的点挤过来
+                cv::circle(mMask, pt, mMinDist, 0, -1);
+            }
+        }
+    }
+
+    // 计算全局还需要的特征点缺口
+    int global_needed = mMaxCnt - (int)mvCurPts.size();
+    if (global_needed <= 0)
+        return; // 老点数量已经足够，不需要提取新特征点
+
+    // 查漏补缺：利用全图大 Mask 一次性提取新特征点
+    // OpenCV 会自动避开 Mask 上所有画了黑圈（0）的老点地盘，只在剩下的白色空旷区域找新点
+    std::vector<cv::Point2f> nPts;
+    cv::goodFeaturesToTrack(img, nPts, global_needed, 0.01, mMinDist, mMask);
+
+    if (!nPts.empty())
+    {
+        // 对提出来的局部新角点进行亚像素（Sub-pixel）精确化
+        cv::TermCriteria criteria(cv::TermCriteria::MAX_ITER + cv::TermCriteria::EPS, 30, 0.01);
+        cv::cornerSubPix(img, nPts, cv::Size(5, 5), cv::Size(-1, -1), criteria);
+
+        // 将合格的新特征点补充进系统
+        for (const auto &pt : nPts)
+        {
+            int ix = cvRound(pt.x);
+            int iy = cvRound(pt.y);
+
+            // 图像边界越界保护
+            if (ix >= 0 && ix < mMask.cols && iy >= 0 && iy < mMask.rows)
+            {
+                // 再次双重检查，确保新特征点相互之间不会因过于紧凑而违背最小距离约束
+                if (mMask.at<uchar>(iy, ix) == 255)
                 {
-                    cv::Point2f global_pt(pt.x + x, pt.y + y);
+                    mvCurPts.push_back(pt);         // 存入特征点坐标列表
+                    mvIds.push_back(mNextId++);     // 分配全局唯一新 ID
+                    mvTrackCnt.push_back(1);        // 刚提取的新点，追踪计数初始化为 1
 
-                    // Explicitly round to integer coordinates to prevent out-of-bound truncation bugs
-                    int ix = cvRound(global_pt.x);
-                    int iy = cvRound(global_pt.y);
-
-                    // Safeguard check against image borders
-                    if (ix >= 0 && ix < mMask.cols && iy >= 0 && iy < mMask.rows)
-                    {
-                        if (mMask.at<uchar>(iy, ix) == 255) // safe element access using (row, col) syntax
-                        {
-                            mvCurPts.push_back(global_pt);
-                            mvIds.push_back(mNextId++);
-                            mvTrackCnt.push_back(1);
-                            cv::circle(mMask, global_pt, mMinDist, 0, -1);
-                            if ((int)mvCurPts.size() >= mMaxCnt)
-                                return;
-                        }
-                    }
+                    // 同样在掩膜中给新点画圈，防止极相邻的新点也被塞进来
+                    cv::circle(mMask, pt, mMinDist, 0, -1);
+                    
+                    // 实时检查是否达到上限，达到则提早返回
+                    if ((int)mvCurPts.size() >= mMaxCnt)
+                        break;
                 }
             }
         }
     }
-    // ================== 【新增：打印提取后的特征点总数】 ==================
-    std::cout << "[VO-TRACK-DEBUG] 当前图像帧保留/提取的特征点总数: " << mvCurPts.size() << std::endl;
-    // ====================================================================
+    std::cout << "[VO-TRACK-DEBUG] 经过老点筛选与新点补齐后，当前帧特征点总数: " << mvCurPts.size() << std::endl;
 }
+
 
 void FeatureDetector::UpdatePreviousStatus(const cv::Mat &grayLeft)
 {
