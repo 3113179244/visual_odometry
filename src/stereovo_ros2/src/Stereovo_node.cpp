@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
-#include <iomanip> // 用于 std::setw 和 std::setfill
+#include <iomanip> 
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
@@ -71,8 +71,6 @@ public:
         {
             RCLCPP_ERROR(node_->get_logger(), "错误：无法创建或打开 trajectory.txt！");
         }
-
-        // 启动本地文件读取线程
         dataset_thread_ = std::thread(&StereoVONode::load_kitti_dataset, this, sequence_path);
     }
 
@@ -98,7 +96,6 @@ private:
         }
     }
 
-    // 新增：核心本地数据集加载逻辑
     void load_kitti_dataset(const std::string &sequence_path)
     {
         std::string times_file = sequence_path + "/times.txt";
@@ -113,14 +110,10 @@ private:
 
         std::string line;
         int frame_id = 0;
-
-        // 逐行读取时间戳并加载对应的图片
         while (std::getline(fTimes, line) && rclcpp::ok())
         {
             if (line.empty()) continue;
             double timestamp = std::stod(line);
-
-            // 拼接 KITTI 命名的 6 位数字，如 000000.png
             std::stringstream ss;
             ss << std::setw(6) << std::setfill('0') << frame_id;
             std::string img_name = ss.str() + ".png";
@@ -137,23 +130,14 @@ private:
                 RCLCPP_WARN(node_->get_logger(), "图片读取结束或失败，总计处理了 %d 帧。", frame_id);
                 break;
             }
-
-            // 直接喂入前端进行追踪与后端 BA 优化
             mpTracker->FeedStereoImages(mat0, mat1, timestamp);
             frame_id++;
-
-            // 【性能平衡控制】
-            // 本地 IO 极其快速，前端算法缓冲区如果塞得太满会导致内存飙升。
-            // 这里控制每帧读取完稍微休眠一下（10ms ≈ 100Hz 播放速度），确保有足够的时间留给后端优化和 RViz 渲染展示。
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
         RCLCPP_INFO(node_->get_logger(), "数据集加载线程执行完毕。");
     }
 
-    // =========================================================================
-    // 以下原有的可视化发布函数逻辑完全保持不变，直接兼容原有的系统工作流
-    // =========================================================================
     void PublishLatestOdometry(const Eigen::Vector3d &P, const Eigen::Quaterniond &Q, double t)
     {
         nav_msgs::msg::Odometry odom;
@@ -416,8 +400,6 @@ int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
     auto non_ros_args = rclcpp::remove_ros_arguments(argc, argv);
-    
-    // 调整参数检测：现在需要接受两个参数 [配置文件路径] [KITTI文件夹路径]
     if (non_ros_args.size() != 3)
     {
         std::cout << "用法: ros2 run stereovo_ros2 Stereovo_node [配置文件绝对路径] [KITTI序列文件夹绝对路径]" << std::endl;
@@ -426,8 +408,6 @@ int main(int argc, char **argv)
     }
     
     Parameters::readParameters(non_ros_args[1]);
-
-    // 创建节点并将第二个参数传递进去
     auto app = std::make_shared<StereoVONode>(non_ros_args[2]);
     rclcpp::spin(app->get_node());
     rclcpp::shutdown();

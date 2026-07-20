@@ -23,7 +23,7 @@
 // ==================== 构造函数 / 析构函数 ====================
 
 Tracking::Tracking(std::shared_ptr<Map> pMap)
-    : mpMap(pMap), mIsInitialized(false), mIsRunning(true), mNeedOptimize(false), mNextKFId(0), mPrevTime(0.0)
+    : mpMap(pMap), mIsInitialized(true), mIsRunning(true), mNeedOptimize(false), mNextKFId(0), mPrevTime(0.0)
 {
     // 从全局参数中读取配置
     mFlowBack = (Parameters::FLOW_BACK != 0);
@@ -42,7 +42,6 @@ Tracking::Tracking(std::shared_ptr<Map> pMap)
     mCurrentPose = Eigen::Isometry3d::Identity();
     mpFeatureDetector = std::make_unique<FeatureDetector>(Parameters::MAX_CNT, Parameters::MIN_DIST, mFlowBack);
 
-    // 启动两个独立线程：前端跟踪循环 和 后端优化循环
     mTrackThread = std::thread(&Tracking::TrackLoop, this);
     mBackendThread = std::thread(&Tracking::BackendLoop, this);
 }
@@ -171,7 +170,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     }
 
     // ---------- 2. 初始化（第一帧） ----------
-    if (!mIsInitialized)
+    if (mIsInitialized)
     {
         // 清空旧数据，检测第一帧特征
         mpFeatureDetector->mvCurPts.clear();
@@ -219,7 +218,7 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         {
             mvpPrevKFPointsMap[pair.first] = pair.second.ptLeft;
         }
-        mIsInitialized = true;
+        mIsInitialized = false;
 
         // 4. 绘制特征点
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
