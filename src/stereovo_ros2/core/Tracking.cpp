@@ -256,12 +256,15 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         isKeyFrame = NeedNewKeyFrame();
     }
 
-    // e. 三角化新的地图点（只在关键帧执行）
-    mpFeatureDetector->TriangulateNewPoints(
-        grayLeft, grayRight, localPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
-        mK1, mK2, mP1, mP2,
-        mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);
-
+    // 只有在是关键帧（或者是初始第一帧）时，才进去做光流和 SVD 三角化
+    if (isKeyFrame || mIsInitialized)
+    {
+        mpFeatureDetector->TriangulateNewPoints(
+            grayLeft, grayRight, localPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
+            mK1, mK2, mP1, mP2,
+            mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);
+    }
+    
     // f. 若为关键帧，则添加到地图，并触发后端优化
     if (isKeyFrame)
     {

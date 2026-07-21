@@ -32,7 +32,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
-
+find_package(DBoW3 REQUIRED)
 # -----------------------------------------------------------------------------
 # 2. 寻找第三方 SLAM 核心数学/视觉库
 # -----------------------------------------------------------------------------
@@ -70,6 +70,7 @@ add_library(${PROJECT_NAME}_lib
   core/Tracking.cpp
   core/Map.cpp
   core/MapPoint.cpp
+  core/LoopClosing.cpp
   backend/Optimizer.cpp
   ${YOLOV8_CODE_DIR}/src/model.cpp
   ${YOLOV8_CODE_DIR}/src/preprocess.cu
@@ -81,6 +82,7 @@ add_library(${PROJECT_NAME}_lib
 target_link_libraries(${PROJECT_NAME}_lib 
   ${OpenCV_LIBS} 
   ${CERES_LIBRARIES} 
+  ${DBoW3_LIBS}
   Sophus::Sophus
   nvinfer                      
   cudart                       
@@ -106,7 +108,7 @@ ament_target_dependencies(${PROJECT_NAME}_lib
 # -----------------------------------------------------------------------------
 add_executable(Stereovo_node src/Stereovo_node.cpp)
 
-target_link_libraries(Stereovo_node ${PROJECT_NAME}_lib) 
+target_link_libraries(Stereovo_node ${PROJECT_NAME}_lib DBoW3) 
 
 ament_target_dependencies(Stereovo_node
   rclcpp 
