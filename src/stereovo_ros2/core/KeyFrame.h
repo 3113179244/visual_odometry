@@ -33,16 +33,6 @@ public:
     unsigned long mId;                         // 关键帧专属 ID
     double mTimeStamp;                         // 时间戳
     std::map<int, StereoObs> mmObservations;   // 双目 2D 像素观测
-    cv::Mat mImgLeft, mImgRight; // 保存原始图像用于后端回环计算 ORB
-    // ORB 特征与词袋
-    std::vector<cv::KeyPoint> mvOrbKeysLeft;
-    cv::Mat mDescriptorsLeft;
-    DBoW3::BowVector mBowVec;
-    // 对应左目 ORB 特征点的 3D 空间点 (相机系或世界系)
-    std::vector<cv::Point3f> mvMapPoints3D; 
-
-    // 回环边/图连接: <连接关键帧ID, 相对位姿 T_parent_child>
-    std::map<unsigned long, Eigen::Isometry3d> mmLoopEdges;
 
 private:
     Eigen::Isometry3d mTwc; // 相机到世界的绝对位姿 (T_w_c)
