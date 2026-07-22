@@ -135,7 +135,7 @@ install(TARGETS
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch config rviz2
+install(DIRECTORY launch config rviz2 Vocabulary
   DESTINATION share/${PROJECT_NAME}
 )
 

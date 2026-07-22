@@ -16,6 +16,7 @@
 class Map;
 class MapPoint;
 class FeatureDetector;
+class LoopClosing;
 
 class Tracking
 {
@@ -36,6 +37,12 @@ public:
     void RegisterCallback(RenderCallback cb);
     void FeedStereoImages(const cv::Mat &imLeft, const cv::Mat &imRight, double timestamp);
 
+    // 💡【新增】：线程同步控制接口
+    void RequestPause();
+    bool IsPaused();
+    void Resume();
+    bool IsBufEmpty();
+
 private:
     void TrackLoop();
 
@@ -49,6 +56,9 @@ private:
     void CullMapPoints();
     void CullRedundantKeyFrames();
 
+    // 💡【新增】：内部暂停检查函数
+    bool CheckPause();
+
 private:
     bool mIsInitialized;
     cv::Mat mPrevImg;
@@ -56,6 +66,7 @@ private:
     std::shared_ptr<Map> mpMap;
     std::map<int, std::shared_ptr<MapPoint>> mmIDToMapPoint;
     std::map<int, cv::Point2f> mvpPrevKFPointsMap;
+    std::shared_ptr<LoopClosing> mpLoopClosing;
     unsigned long mNextKFId;
     Eigen::Isometry3d mCurrentPose;
 
@@ -83,6 +94,11 @@ private:
     std::condition_variable mCondBackend;
     bool mNeedOptimize;
     int mnCullCounter = 0;
+
+    // 💡【新增】：线程暂停状态标志与互斥锁
+    bool mbPauseRequested = false;
+    bool mbPaused = false;
+    std::mutex mMutexPause;
 };
 
 #endif // TRACKING_H

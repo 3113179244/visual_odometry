@@ -91,12 +91,17 @@ bool FeatureDetector::EstimatePosePnP(
     std::vector<cv::Point3f> objectPoints;
     std::vector<cv::Point2f> imagePoints;
     std::vector<int> pnpFeatureIndices;
+
     for (size_t i = 0; i < mvCurPts.size(); ++i)
     {
         int id = mvIds[i];
         auto it = mmIDToMapPoint.find(id);
         if (it != mmIDToMapPoint.end())
         {
+            // 💡【核心修复】：忽略被标记为 Bad 的地图点，防止使用失效坐标参与 PnP
+            if (it->second->IsBad())
+                continue;
+
             Eigen::Vector3d pos = it->second->GetWorldPos();
             objectPoints.push_back(cv::Point3f(pos.x(), pos.y(), pos.z()));
             imagePoints.push_back(mvCurPts[i]);
@@ -106,11 +111,13 @@ bool FeatureDetector::EstimatePosePnP(
 
     if (objectPoints.size() < 4)
         return false;
+
     cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
     cv::Mat distCoeffs = (cv::Mat_<double>(4, 1) << k1, k2, p1, p2);
     cv::Mat rvec, tvec;
     std::vector<int> inliers;
     bool pnp_succ = cv::solvePnPRansac(objectPoints, imagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, 100, 1.0, 0.99, inliers, cv::SOLVEPNP_ITERATIVE);
+    
     if (pnp_succ && inliers.size() >= 4)
     {
         cv::Mat R;
@@ -127,6 +134,7 @@ bool FeatureDetector::EstimatePosePnP(
         std::vector<bool> isInlier(mvCurPts.size(), false);
         for (int idx : inliers)
             isInlier[pnpFeatureIndices[idx]] = true;
+            
         std::vector<cv::Point2f> compressedPts;
         std::vector<int> compressedIds;
         std::vector<int> compressedTrackCnt;
@@ -164,14 +172,9 @@ bool FeatureDetector::EstimatePosePnP(
         mvIds = compressedIds;
         mvTrackCnt = compressedTrackCnt;
 
-        DEBUG_INFO("PnP Tracked Points: " << objectPoints.size()
-                                          << " | Inliers: " << inliers.size()
-                                          << " | Reverted Outliers: " << (objectPoints.size() - inliers.size()));
-
         return true;
     }
 
-    DEBUG_ERROR("PnP Tracking FAILED! Total features: " << objectPoints.size());
     return false;
 }
 
@@ -446,7 +449,7 @@ void FeatureDetector::AddNewFeatures(const cv::Mat &img)
             }
         }
     }
-    std::cout << "[VO-TRACK-DEBUG] 经过老点筛选与新点补齐后，当前帧特征点总数: " << mvCurPts.size() << std::endl;
+    // std::cout << "[VO-TRACK-DEBUG] 经过老点筛选与新点补齐后，当前帧特征点总数: " << mvCurPts.size() << std::endl;
 }
 
 

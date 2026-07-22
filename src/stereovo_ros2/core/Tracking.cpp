@@ -6,26 +6,14 @@
 #include "utils/Parameters.h"
 #include <opencv2/core/eigen.hpp>
 #include <iostream>
-
-/**
- * @file Tracking.cpp
- * @brief 前端视觉里程计核心类实现
- *
- * 负责：
- *   - 接收双目图像，执行光流跟踪、PnP位姿估计
- *   - 管理关键帧的创建与地图点的三角化
- *   - 触发后端局部BA优化
- *   - 提供可视化渲染回调
- *
- * 主要流程见 ProcessStereo() 函数。
- */
+#include "core/LoopClosing.h"
 
 // ==================== 构造函数 / 析构函数 ====================
 
 Tracking::Tracking(std::shared_ptr<Map> pMap)
-    : mpMap(pMap), mIsInitialized(true), mIsRunning(true), mNeedOptimize(false), mNextKFId(0), mPrevTime(0.0)
+    : mpMap(pMap), mIsInitialized(true), mIsRunning(true), mNeedOptimize(false), 
+      mNextKFId(0), mPrevTime(0.0), mbPauseRequested(false), mbPaused(false)
 {
-    // 从全局参数中读取配置
     mFlowBack = (Parameters::FLOW_BACK != 0);
     mFx = Parameters::fx;
     mFy = Parameters::fy;
@@ -44,11 +32,17 @@ Tracking::Tracking(std::shared_ptr<Map> pMap)
 
     mTrackThread = std::thread(&Tracking::TrackLoop, this);
     mBackendThread = std::thread(&Tracking::BackendLoop, this);
+    std::string voc_path = "/home/wzj/visual_odometry/src/stereovo_ros2/Vocabulary/ORBvoc.txt";
+    mpLoopClosing = std::make_shared<LoopClosing>(mpMap, voc_path);
+    
+    // 💡【新增】：将 Tracking 指针关联给 LoopClosing
+    if (mpLoopClosing) {
+        mpLoopClosing->SetTracking(this);
+    }
 }
 
 Tracking::~Tracking()
 {
-    // 安全停止线程
     {
         std::unique_lock<std::mutex> lock1(mMutexBuf);
         std::unique_lock<std::mutex> lock2(mMutexBackend);
@@ -62,16 +56,15 @@ Tracking::~Tracking()
         mBackendThread.join();
 }
 
-// ==================== 外部接口 ====================
+// ==================== 外部接口与同步控制 ====================
 
 void Tracking::RegisterCallback(RenderCallback cb)
 {
-    mRenderCb = cb; // 注册可视化回调，由上层（Stereovo_node）实现
+    mRenderCb = cb;
 }
 
 void Tracking::FeedStereoImages(const cv::Mat &imLeft, const cv::Mat &imRight, double timestamp)
 {
-    // 将新图像放入缓冲区，唤醒跟踪线程
     std::unique_lock<std::mutex> lock(mMutexBuf);
     mLeftBuf.push(imLeft.clone());
     mRightBuf.push(imRight.clone());
@@ -79,21 +72,69 @@ void Tracking::FeedStereoImages(const cv::Mat &imLeft, const cv::Mat &imRight, d
     mCondBuf.notify_one();
 }
 
-// ==================== 前端跟踪主循环（线程） ====================
+// 💡【新增】：控制线程暂停与恢复实现
+void Tracking::RequestPause()
+{
+    std::unique_lock<std::mutex> lock(mMutexPause);
+    mbPauseRequested = true;
+    mCondBuf.notify_all(); 
+}
+
+bool Tracking::IsPaused()
+{
+    std::unique_lock<std::mutex> lock(mMutexPause);
+    return mbPaused;
+}
+
+void Tracking::Resume()
+{
+    std::unique_lock<std::mutex> lock(mMutexPause);
+    mbPauseRequested = false;
+    mbPaused = false;
+    std::cout << "\033[32m[Tracking] 前端线程已成功恢复运行。\033[0m" << std::endl;
+}
+
+bool Tracking::CheckPause()
+{
+    std::unique_lock<std::mutex> lock(mMutexPause);
+    if (mbPauseRequested)
+    {
+        mbPaused = true;
+        return true;
+    }
+    return false;
+}
+
+// ==================== 前端跟踪主循环 ====================
 
 void Tracking::TrackLoop()
 {
     while (true)
     {
+        // 1. 检查并挂起线程
+        while (CheckPause()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+
         cv::Mat matLeft, matRight;
         double timestamp = 0.0;
         {
             std::unique_lock<std::mutex> lock(mMutexBuf);
-            mCondBuf.wait(lock, [this]
-                          { return !mIsRunning || (!mLeftBuf.empty() && !mRightBuf.empty() && !mTimeBuf.empty()); });
+            
+            // 💡【修复】：Predicate 加上 mbPauseRequested 条件，允许因暂停请求而唤醒
+            mCondBuf.wait(lock, [this] { 
+                return !mIsRunning || 
+                       (!mLeftBuf.empty() && !mRightBuf.empty() && !mTimeBuf.empty()) || 
+                       mbPauseRequested; 
+            });
 
             if (!mIsRunning)
                 break;
+
+            // 💡【修复】：如果是为了相应暂停请求被唤醒且缓冲区为空，跳过本次处理，回到循环顶部触发 CheckPause()
+            if (mbPauseRequested && (mLeftBuf.empty() || mRightBuf.empty())) {
+                continue;
+            }
 
             matLeft = mLeftBuf.front();
             mLeftBuf.pop();
@@ -103,14 +144,12 @@ void Tracking::TrackLoop()
             mTimeBuf.pop();
         }
 
-        // 处理当前帧（核心函数）
         cv::Mat feat_img;
         std::vector<Eigen::Vector3d> vWorldPoints;
         std::vector<Eigen::Vector3d> vKFPositions;
 
         Eigen::Isometry3d Tcw = ProcessStereo(matLeft, matRight, timestamp, feat_img, vWorldPoints, vKFPositions);
 
-        // 如果有渲染回调，将结果传递给上层（用于发布ROS消息）
         if (mRenderCb && !feat_img.empty())
         {
             mRenderCb(timestamp, feat_img, vWorldPoints, vKFPositions, Tcw,
@@ -119,29 +158,13 @@ void Tracking::TrackLoop()
     }
 }
 
-// ==================== 核心：单帧立体处理流程 ====================
+// ==================== 单帧立体处理流程 ====================
 
 Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &imRight,
                                           const double &timestamp, cv::Mat &imgTrack,
                                           std::vector<Eigen::Vector3d> &vWorldPoints,
                                           std::vector<Eigen::Vector3d> &vKFPositions)
 {
-    /**
-     * @brief 处理一对立体图像，执行完整的 VO 前端流程
-     * @steps:
-     *  1. 灰度化 + CLAHE 对比度增强
-     *  2. 若未初始化：提取第一批特征，创建首个关键帧
-     *  3. 否则：
-     *     a. 光流跟踪上一帧特征到当前帧
-     *     b. PnP 求解当前帧位姿（利用已有地图点）
-     *     c. 剔除异常特征，补充新特征
-     *     d. 判断是否创建关键帧
-     *     e. 若是关键帧：三角化新的地图点，触发后端优化
-     *  4. 更新速度、可视化、保存上一帧状态
-     *  5. 返回当前帧的相机位姿 (Tcw)
-     */
-
-    // ---------- 1. 预处理 ----------
     cv::Mat grayLeft = imLeft;
     if (imLeft.channels() == 3)
         cv::cvtColor(imLeft, grayLeft, cv::COLOR_BGR2GRAY);
@@ -153,7 +176,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     clahe->apply(grayLeft, grayLeft);
     clahe->apply(grayRight, grayRight);
 
-    // 拼接左右图用于可视化
     cv::Mat imgLeftBGR, imgRightBGR;
     cv::cvtColor(grayLeft, imgLeftBGR, cv::COLOR_GRAY2BGR);
     cv::cvtColor(grayRight, imgRightBGR, cv::COLOR_GRAY2BGR);
@@ -162,17 +184,14 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     vWorldPoints.clear();
     vKFPositions.clear();
 
-    // 读取当前全局位姿（线程安全）
     Eigen::Isometry3d localPose;
     {
         std::unique_lock<std::mutex> lock(mMutexBackend);
         localPose = mCurrentPose;
     }
 
-    // ---------- 2. 初始化（第一帧） ----------
     if (mIsInitialized)
     {
-        // 清空旧数据，检测第一帧特征
         mpFeatureDetector->mvCurPts.clear();
         mpFeatureDetector->mvIds.clear();
         mpFeatureDetector->mvTrackCnt.clear();
@@ -180,20 +199,16 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
 
         localPose = Eigen::Isometry3d::Identity();
 
-        // 1. 提取左目第一批初始特征点
         mpFeatureDetector->AddNewFeatures(grayLeft);
         mpFeatureDetector->mvPtsVel.resize(mpFeatureDetector->mvCurPts.size(), cv::Point2f(0.0f, 0.0f));
         mPrevTime = timestamp;
         mPrevImg = grayLeft.clone();
 
-        // 2. 【新增核心】在第一帧立即进行双目匹配与三角化，构建初始 3D 地图点
-        // 第一帧作为世界坐标系原点，传入 localPose (Identity)
         mpFeatureDetector->TriangulateNewPoints(
             grayLeft, grayRight, localPose, mBodyTCam0, mBodyTCam1, mFx, mFy, mCx, mCy,
             mK1, mK2, mP1, mP2,
             mmIDToMapPoint, mpMap, true, vWorldPoints, imgTrack);
 
-        // 3. 创建第一个关键帧（收集当前帧成功生成 3D 地图点或被观测到的特征）
         std::map<int, StereoObs> initMeasurements;
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
@@ -208,11 +223,12 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             initMeasurements[id] = obs;
         }
 
-        // 第一帧 localPose 为单位阵，代表当前相机坐标系即为世界坐标系原点。
-        // 传入的位姿直接就是 localPose 即可，不需要求逆
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, initMeasurements);
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, initMeasurements, grayLeft);
         mpMap->AddKeyFrame(pKF);
-
+        if (mpLoopClosing)
+        {
+            mpLoopClosing->InsertKeyFrame(pKF);
+        }
         mvpPrevKFPointsMap.clear();
         for (const auto &pair : initMeasurements)
         {
@@ -220,7 +236,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         }
         mIsInitialized = false;
 
-        // 4. 绘制特征点
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
             double len = std::min(1.0, 1.0 * mpFeatureDetector->mvTrackCnt[i] / 20.0);
@@ -238,25 +253,18 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         return localPose;
     }
 
-    // ---------- 3. 正常跟踪模式 ----------
-    // a. 光流跟踪上一帧特征到当前帧
     mpFeatureDetector->TrackFeaturesLK(mPrevImg, grayLeft);
-
-    // b. PnP 估计当前位姿（基于已有地图点）
     bool pnp_succ = mpFeatureDetector->EstimatePosePnP(mmIDToMapPoint, mFx, mFy, mCx, mCy, mK1, mK2, mP1, mP2, localPose);
 
-    // c. 重新设置掩码并补充新特征（保持特征数量稳定）
     mpFeatureDetector->SetMask(grayLeft.rows, grayLeft.cols);
     mpFeatureDetector->AddNewFeatures(grayLeft);
 
-    // d. 判断是否为关键帧
     bool isKeyFrame = false;
     if (pnp_succ)
     {
         isKeyFrame = NeedNewKeyFrame();
     }
 
-    // 只有在是关键帧（或者是初始第一帧）时，才进去做光流和 SVD 三角化
     if (isKeyFrame || mIsInitialized)
     {
         mpFeatureDetector->TriangulateNewPoints(
@@ -264,11 +272,9 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             mK1, mK2, mP1, mP2,
             mmIDToMapPoint, mpMap, isKeyFrame, vWorldPoints, imgTrack);
     }
-    
-    // f. 若为关键帧，则添加到地图，并触发后端优化
+
     if (isKeyFrame)
     {
-        // 构建当前帧的观测
         std::map<int, StereoObs> currentMeasurements;
         for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); ++i)
         {
@@ -283,26 +289,30 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
             currentMeasurements[id] = obs;
         }
 
-        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, currentMeasurements);
+        auto pKF = std::make_shared<KeyFrame>(mNextKFId++, timestamp, localPose, currentMeasurements, grayLeft);
         mpMap->AddKeyFrame(pKF);
+
+        if (mpLoopClosing)
+        {
+            mpLoopClosing->InsertKeyFrame(pKF);
+        }
+
         mvpPrevKFPointsMap.clear();
         for (const auto &pair : currentMeasurements)
         {
             mvpPrevKFPointsMap[pair.first] = pair.second.ptLeft;
         }
-        // 通知后端线程进行局部BA
+
         {
             std::unique_lock<std::mutex> lock(mMutexBackend);
             mNeedOptimize = true;
         }
         mCondBackend.notify_one();
 
-        // 清理劣质地图点和冗余关键帧
         CullMapPoints();
         CullRedundantKeyFrames();
     }
 
-    // 如果 PnP 失败，至少将已有地图点加入可视化列表
     if (!pnp_succ)
     {
         for (const auto &pair : mmIDToMapPoint)
@@ -311,14 +321,12 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         }
     }
 
-    // 收集所有关键帧位置用于可视化
     auto allKFs = mpMap->GetAllKeyFrames();
     for (const auto &kf : allKFs)
     {
         vKFPositions.push_back(kf->GetPose().translation());
     }
 
-    // 绘制当前特征点（颜色表示跟踪长度）
     for (size_t i = 0; i < mpFeatureDetector->mvCurPts.size(); i++)
     {
         double len = std::min(1.0, 1.0 * mpFeatureDetector->mvTrackCnt[i] / 20.0);
@@ -326,7 +334,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
         cv::circle(imgTrack, mpFeatureDetector->mvCurPts[i], 2, ptColor, 2);
     }
 
-    // 计算特征点速度（用于前端）
     mpFeatureDetector->mvPtsVel.assign(mpFeatureDetector->mvCurPts.size(), cv::Point2f(0.0f, 0.0f));
     double dt = timestamp - mPrevTime;
     if (dt > 1e-5)
@@ -348,7 +355,6 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     mPrevImg = grayLeft.clone();
     mpFeatureDetector->UpdatePreviousStatus(grayLeft);
 
-    // 更新全局位姿
     {
         std::unique_lock<std::mutex> lock(mMutexBackend);
         mCurrentPose = localPose;
@@ -356,14 +362,10 @@ Eigen::Isometry3d Tracking::ProcessStereo(const cv::Mat &imLeft, const cv::Mat &
     return localPose;
 }
 
-// ==================== 关键帧决策 ====================
+// ==================== 辅助与后端优化函数 ====================
 
 bool Tracking::NeedNewKeyFrame()
 {
-    /**
-     * @brief 判断当前帧是否应该成为关键帧
-     * 标准：当前帧与上一关键帧之间的平均视差超过阈值，或者特征数过少
-     */
     if (mpFeatureDetector->mvCurPts.size() < 20)
         return true;
 
@@ -389,15 +391,12 @@ bool Tracking::NeedNewKeyFrame()
 
 void Tracking::CullMapPoints()
 {
-    // 1. 锁定地图数据
     std::unique_lock<std::mutex> lock(mpMap->GetMutex());
-    auto &mspMapPoints = mpMap->GetMapPoints(); // 注意这里是引用，可直接修改
+    auto &mspMapPoints = mpMap->GetMapPoints();
 
-    // ===== 筛选参数 =====
-    const int MIN_OBSERVATIONS = 2;        // 最少观测次数，低于此值的地图点将被标记为坏点
-    const int MAX_CONSECUTIVE_OUTLIER = 3; // 连续被判定为外点的最大次数，超过此值的地图点将被标记为坏点
+    const int MIN_OBSERVATIONS = 2;
+    const int MAX_CONSECUTIVE_OUTLIER = 3;
 
-    // 每 3 次调用执行一次清理
     mnCullCounter++;
     if (mnCullCounter < 3)
         return;
@@ -414,13 +413,10 @@ void Tracking::CullMapPoints()
         }
 
         bool shouldRemove = false;
-
-        // 核心动态变化判断 1：观测该点的关键帧过少（说明它已经滑出了滑窗内关键帧的共视范围）
         if (pMP->GetObservationCount() < MIN_OBSERVATIONS)
         {
             shouldRemove = true;
         }
-        // 核心动态变化判断 2：该点在当前的 PnP 求解中连续被判定为外点（说明发生了追踪漂移或错配）
         else if (pMP->GetConsecutiveOutlier() >= MAX_CONSECUTIVE_OUTLIER)
         {
             shouldRemove = true;
@@ -494,7 +490,6 @@ void Tracking::CullRedundantKeyFrames()
         }
     }
 }
-// ==================== 后端优化线程（独立） ====================
 
 void Tracking::BackendLoop()
 {
@@ -509,7 +504,12 @@ void Tracking::BackendLoop()
                 break;
             mNeedOptimize = false;
         }
-        // 调用静态优化函数，窗口大小为 10
         Optimizer::LocalBundleAdjustment(mpMap, 10);
     }
+}
+
+bool Tracking::IsBufEmpty()
+{
+    std::unique_lock<std::mutex> lock(mMutexBuf);
+    return mLeftBuf.empty();
 }

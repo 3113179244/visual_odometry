@@ -7,36 +7,44 @@
 #include <opencv2/opencv.hpp>
 #include <mutex>
 #include <vector>
-#include <DBoW3/BowVector.h>
-// 新增双目观测结构体
+#include <memory>
+#include <DBoW3/DBoW3.h>
+
 struct StereoObs {
-    cv::Point2f ptLeft;    // 左目像素特征点
-    cv::Point2f ptRight;   // 同一特征 ID 在右目的像素特征点
-    bool hasRight = false; // 当前帧该点是否成功追到了右目
+    cv::Point2f ptLeft;
+    cv::Point2f ptRight;
+    bool hasRight = false;
 };
 
 class KeyFrame
 {
 public:
-    // 构造函数：输入变更为带有左右目特征的 StereoObs
     KeyFrame(unsigned long id, double timestamp, const Eigen::Isometry3d &Twc,
-             const std::map<int, StereoObs> &measurements)
-        : mId(id), mTimeStamp(timestamp), mTwc(Twc), mmObservations(measurements) {}
+             const std::map<int, StereoObs> &measurements, const cv::Mat &imgLeft);
 
     ~KeyFrame() = default;
 
-    // 供外部调用的线程安全接口
     Eigen::Isometry3d GetPose();
     void SetPose(const Eigen::Isometry3d &Twc_opt);
 
-public:
-    unsigned long mId;                         // 关键帧专属 ID
-    double mTimeStamp;                         // 时间戳
-    std::map<int, StereoObs> mmObservations;   // 双目 2D 像素观测
+    // 计算 DBoW3 词包向量
+    void ComputeBoW(std::shared_ptr<DBoW3::Vocabulary> pVoc);
 
+public:
+    unsigned long mId;
+    double mTimeStamp;
+    std::map<int, StereoObs> mmObservations;
+    cv::Mat mImgLeft; // 左目图像，用于ORB描述子计算
+
+    // DBoW3 数据结构
+    std::vector<cv::KeyPoint> mvKeys;
+    cv::Mat mDescriptors;
+    DBoW3::BowVector mBowVec;
+    DBoW3::FeatureVector mFeatVec;
+    std::vector<int> mvKeyFeatureIds;
 private:
-    Eigen::Isometry3d mTwc; // 相机到世界的绝对位姿 (T_w_c)
-    std::mutex mMutexPose;  // 专用于保护位姿的互斥锁
+    Eigen::Isometry3d mTwc;
+    std::mutex mMutexPose;
 };
 
 #endif // KEYFRAME_H

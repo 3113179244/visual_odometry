@@ -521,3 +521,122 @@ void Optimizer::LocalBundleAdjustment(std::shared_ptr<Map> map, int windowSize)
         mapPointRefVec[j]->SetWorldPos(posWorldOpt); // 写入最优 3D 坐标
     }
 }
+
+// 自定义 SE(3) 位姿图约束残差块
+struct SE3GraphCostFunction
+{
+    SE3GraphCostFunction(const Sophus::SE3d &T_ij_measured)
+        : T_ij_measured_(T_ij_measured) {}
+
+    template <typename T>
+    bool operator()(const T *const pose_i, const T *const pose_j, T *residuals) const
+    {
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> t_i(pose_i);
+        Eigen::Map<const Eigen::Quaternion<T>> q_i(pose_i + 3);
+
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> t_j(pose_j);
+        Eigen::Map<const Eigen::Quaternion<T>> q_j(pose_j + 3);
+
+        Sophus::SE3<T> T_w_i(q_i, t_i);
+        Sophus::SE3<T> T_w_j(q_j, t_j);
+
+        // 预测的相对位姿 T_ij = T_w_i^-1 * T_w_j
+        Sophus::SE3<T> T_ij_pred = T_w_i.inverse() * T_w_j;
+
+        // 位姿残差 e = Log( T_ij_measured^-1 * T_ij_pred )
+        Sophus::SE3<T> T_error = T_ij_measured_.template cast<T>().inverse() * T_ij_pred;
+        Eigen::Matrix<T, 6, 1> error = T_error.log();
+
+        for (int k = 0; k < 6; ++k)
+            residuals[k] = error(k);
+
+        return true;
+    }
+
+    Sophus::SE3d T_ij_measured_;
+};
+
+void Optimizer::PoseGraphOptimization(
+    std::shared_ptr<Map> map,
+    const std::vector<std::pair<unsigned long, unsigned long>> &loopEdges,
+    const std::map<std::pair<unsigned long, unsigned long>, Sophus::SE3d> &loopRelativePoses)
+{
+    if (!map) return;
+    auto keyframes = map->GetAllKeyFrames();
+    if (keyframes.size() < 2) return;
+
+    ceres::Problem problem;
+    PoseLocalParameterization *poseParameterization = new PoseLocalParameterization();
+
+    std::map<unsigned long, std::vector<double>> poseBlocks;
+    std::map<unsigned long, std::shared_ptr<KeyFrame>> idToKF;
+
+    for (auto &kf : keyframes)
+    {
+        idToKF[kf->mId] = kf;
+        Eigen::Isometry3d Twc = kf->GetPose();
+        Eigen::Vector3d t = Twc.translation();
+        Eigen::Quaterniond q(Twc.rotation());
+
+        poseBlocks[kf->mId] = {t.x(), t.y(), t.z(), q.x(), q.y(), q.z(), q.w()};
+        problem.AddParameterBlock(poseBlocks[kf->mId].data(), 7, poseParameterization);
+    }
+
+    // 固定首个关键帧
+    problem.SetParameterBlockConstant(poseBlocks[keyframes.front()->mId].data());
+
+    // 1. 添加连续相邻帧的 Odometry 边
+    for (size_t i = 0; i < keyframes.size() - 1; ++i)
+    {
+        auto kf1 = keyframes[i];
+        auto kf2 = keyframes[i + 1];
+
+        Sophus::SE3d T_w_1(kf1->GetPose().rotation(), kf1->GetPose().translation());
+        Sophus::SE3d T_w_2(kf2->GetPose().rotation(), kf2->GetPose().translation());
+        Sophus::SE3d T_12 = T_w_1.inverse() * T_w_2;
+
+        ceres::CostFunction *cost_func =
+            new ceres::AutoDiffCostFunction<SE3GraphCostFunction, 6, 7, 7>(
+                new SE3GraphCostFunction(T_12));
+
+        problem.AddResidualBlock(cost_func, nullptr, poseBlocks[kf1->mId].data(), poseBlocks[kf2->mId].data());
+    }
+
+    // 2. 添加回环检测约束边 (Loop Edges)
+    for (const auto &edge : loopEdges)
+    {
+        unsigned long id1 = edge.first;
+        unsigned long id2 = edge.second;
+        if (poseBlocks.count(id1) && poseBlocks.count(id2))
+        {
+            Sophus::SE3d T_12_loop = loopRelativePoses.at(edge);
+            ceres::CostFunction *cost_func =
+                new ceres::AutoDiffCostFunction<SE3GraphCostFunction, 6, 7, 7>(
+                    new SE3GraphCostFunction(T_12_loop));
+
+            ceres::LossFunction *loss_func = new ceres::HuberLoss(1.0);
+            problem.AddResidualBlock(cost_func, loss_func, poseBlocks[id1].data(), poseBlocks[id2].data());
+        }
+    }
+
+    // 优化配置
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = 30;
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+
+    // 写回优化后的关键帧位姿
+    for (auto &pair : poseBlocks)
+    {
+        unsigned long id = pair.first;
+        Eigen::Vector3d t(pair.second[0], pair.second[1], pair.second[2]);
+        Eigen::Quaterniond q(pair.second[6], pair.second[3], pair.second[4], pair.second[5]);
+        q.normalize();
+
+        Eigen::Isometry3d Twc = Eigen::Isometry3d::Identity();
+        Twc.linear() = q.toRotationMatrix();
+        Twc.translation() = t;
+        idToKF[id]->SetPose(Twc);
+    }
+}

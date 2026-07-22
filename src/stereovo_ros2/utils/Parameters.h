@@ -73,6 +73,7 @@ public:
     // -------- 时间同步参数 --------
     static int ESTIMATE_TD;
     static double TD;
+    static std::string VOC_PATH;
 };
 
 #endif // PARAMETERS_H

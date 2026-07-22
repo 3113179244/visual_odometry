@@ -8,6 +8,7 @@ std::string Parameters::IMU_TOPIC = "";
 std::string Parameters::IMAGE0_TOPIC = "";
 std::string Parameters::IMAGE1_TOPIC = "";
 std::string Parameters::OUTPUT_PATH = "";
+std::string Parameters::VOC_PATH = "";
 int Parameters::IMAGE_WIDTH = 0;
 int Parameters::IMAGE_HEIGHT = 0;
 
@@ -124,6 +125,7 @@ void Parameters::readParameters(const std::string &config_file)
 
     fs["estimate_td"] >> ESTIMATE_TD;
     fs["td"] >> TD;
+    fs["voc_path"] >> VOC_PATH;
 
     fs.release();
     std::cout << ">>> 成功加载主配文件以及相机内参。图像宽度: " << IMAGE_WIDTH << ", fx: " << fx << std::endl;
