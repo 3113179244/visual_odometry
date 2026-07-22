@@ -2,20 +2,14 @@ cmake_minimum_required(VERSION 3.8)
 project(stereovo_ros2)
 
 # -----------------------------------------------------------------------------
-# 0. 启用 C++ 和 CUDA 支持
+# 0. 基础编译选项 (仅保留 C++ 支持)
 # -----------------------------------------------------------------------------
-enable_language(CUDA)
-
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 14) 
 endif()
 
 add_compile_options(-Wextra -Wpedantic -w)
 set(CMAKE_BUILD_TYPE Release)
-
-set(YOLOV8_CODE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tensorrtx/yolov8")
-
-set(CMAKE_CUDA_ARCHITECTURES "86")
 
 # -----------------------------------------------------------------------------
 # 1. 寻找 ROS 2 官方依赖包
@@ -40,6 +34,7 @@ find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(Sophus REQUIRED)
+
 # -----------------------------------------------------------------------------
 # 3. 头文件包含路径
 # -----------------------------------------------------------------------------
@@ -50,12 +45,7 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${CERES_INCLUDE_DIRS}
   ${Sophus_INCLUDE_DIRS}
-  /usr/local/TensorRT/include
-  ${YOLOV8_CODE_DIR}/include     
-  ${YOLOV8_CODE_DIR}/plugin      
 )
-
-link_directories(/usr/local/TensorRT/lib)
 
 # -----------------------------------------------------------------------------
 # 4. 创建纯 C++ SLAM 核心算法库
@@ -71,19 +61,13 @@ add_library(${PROJECT_NAME}_lib
   core/Map.cpp
   core/MapPoint.cpp
   backend/Optimizer.cpp
-  ${YOLOV8_CODE_DIR}/src/model.cpp
-  ${YOLOV8_CODE_DIR}/src/preprocess.cu
-  ${YOLOV8_CODE_DIR}/src/postprocess.cpp
-  ${YOLOV8_CODE_DIR}/plugin/yololayer.cu
 )
 
-# 链接第三方数学库与 TensorRT 核心库
+# 链接第三方数学/视觉库
 target_link_libraries(${PROJECT_NAME}_lib 
   ${OpenCV_LIBS} 
   ${CERES_LIBRARIES} 
   Sophus::Sophus
-  nvinfer                      
-  cudart                       
 )
 
 # 链接 ROS 2 依赖组件
